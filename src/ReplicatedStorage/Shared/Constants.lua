@@ -26,8 +26,10 @@ Constants.ENEMY = {
 	-- Soft separation between enemies so they don't pile on the same player.
 	SEPARATION_RADIUS = 3.5,
 	SEPARATION_STRENGTH = 4,
-	-- Damage lands at 60% of attack animation (~0.7s for asset 184574340).
-	DAMAGE_DELAY = 0.45,
+	-- Damage and smash effect both fire at this fraction of the cooldown
+	-- (which equals the stretched attack-animation length on the client).
+	-- Slightly under 1.0 so the hit lands just before the next attack queues.
+	DAMAGE_DELAY_FRACTION = 0.9,
 }
 
 Constants.SMASH = {

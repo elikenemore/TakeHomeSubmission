@@ -30,6 +30,7 @@ type Enemy = {
 	variant: EnemyVariants.Variant,
 	health: number,
 	nextAttackAt: number,
+	wanderTarget: Vector3?,
 }
 
 local EnemyService = {}
@@ -75,14 +76,17 @@ local function spawnEnemy()
 	end
 	local id = nextId
 	nextId += 1
+	local variant = EnemyVariants.Roll(rng)
+	local heightOffset = Constants.ENEMY.HEIGHT_OFFSET * variant.scale
 	local enemy: Enemy = {
 		id = id,
-		position = PlatformService.RandomSpawnPosition(rng),
+		position = PlatformService.RandomSpawnPosition(rng, heightOffset),
 		yaw = rng:NextNumber() * math.pi * 2,
 		state = STATE_IDLE,
-		variant = EnemyVariants.Roll(rng),
+		variant = variant,
 		health = Constants.ENEMY.BASE_HEALTH,
 		nextAttackAt = 0,
+		wanderTarget = nil,
 	}
 	enemies[id] = enemy
 	enemyCount += 1
@@ -160,9 +164,11 @@ local function fireSmash(enemy: Enemy, target: Player)
 	}
 	attackEvent:FireAllClients(payload)
 
-	-- Damage lands at the strike point in the animation, not the wind-up frame.
+	-- Damage lands at the end of the attack animation; the client stretches
+	-- the anim playback to cover the full cooldown so this stays in sync.
 	local damage = archetype.damage
-	task.delay(Constants.ENEMY.DAMAGE_DELAY, function()
+	local damageDelay = archetype.cooldown * Constants.ENEMY.DAMAGE_DELAY_FRACTION
+	task.delay(damageDelay, function()
 		if not enemies[enemy.id] then
 			return
 		end
@@ -187,14 +193,51 @@ local function fireSmash(enemy: Enemy, target: Player)
 	end)
 end
 
+local function pickWanderTarget(enemy: Enemy): Vector3
+	local hipHeight = Constants.ENEMY.HEIGHT_OFFSET * enemy.variant.scale
+	return PlatformService.RandomSpawnPosition(rng, hipHeight)
+end
+
 local function updateEnemy(enemy: Enemy, dt: number)
 	local target, targetPos = getClosestPlayerOnPlatform(enemy.position)
 	local archetype = EnemyVariants.GetArchetype(enemy.variant.archetypeIndex)
+	local hipHeight = Constants.ENEMY.HEIGHT_OFFSET * enemy.variant.scale
 
 	if not target or not targetPos then
-		enemy.state = STATE_IDLE
+		-- No player on the platform: pick a random target and amble toward it.
+		if not enemy.wanderTarget then
+			enemy.wanderTarget = pickWanderTarget(enemy)
+		end
+		local wt = enemy.wanderTarget :: Vector3
+		local diff = wt - enemy.position
+		local flat = Vector3.new(diff.X, 0, diff.Z)
+		local dist = flat.Magnitude
+		if dist < 1.5 then
+			enemy.wanderTarget = pickWanderTarget(enemy)
+			enemy.state = STATE_IDLE
+			return
+		end
+		local toTarget = flat.Unit
+		local separation = computeSeparation(enemy)
+		local dir = toTarget + separation * 0.5
+		if dir.Magnitude < 0.01 then
+			enemy.state = STATE_IDLE
+			return
+		end
+		dir = dir.Unit
+		-- Wander at half pace so it reads as ambling, not chasing.
+		local step = math.min(Constants.ENEMY.WALK_SPEED * 0.5 * dt, dist)
+		local newPos = enemy.position + dir * step
+		newPos = PlatformService.ClampToPlatform(newPos)
+		newPos = Vector3.new(newPos.X, PlatformService.GetTopY() + hipHeight, newPos.Z)
+		enemy.position = newPos
+		enemy.yaw = math.atan2(-dir.X, -dir.Z)
+		enemy.state = STATE_WALK
 		return
 	end
+
+	-- Player detected: drop any active wander goal.
+	enemy.wanderTarget = nil
 
 	local diff = targetPos - enemy.position
 	local flat = Vector3.new(diff.X, 0, diff.Z)
@@ -225,7 +268,7 @@ local function updateEnemy(enemy: Enemy, dt: number)
 	local step = math.min(Constants.ENEMY.WALK_SPEED * dt, dist)
 	local newPos = enemy.position + dir * step
 	newPos = PlatformService.ClampToPlatform(newPos)
-	newPos = Vector3.new(newPos.X, PlatformService.GetTopY() + Constants.ENEMY.HEIGHT_OFFSET, newPos.Z)
+	newPos = Vector3.new(newPos.X, PlatformService.GetTopY() + hipHeight, newPos.Z)
 	enemy.position = newPos
 	enemy.yaw = math.atan2(-dir.X, -dir.Z)
 	enemy.state = STATE_WALK

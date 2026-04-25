@@ -185,8 +185,10 @@ local function buildEnemy(payload): Entry?
 	hrp.Anchored = true
 
 	humanoid.AutoRotate = false
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 	humanoid.HealthDisplayDistance = 0
 	humanoid.NameDisplayDistance = 0
+	humanoid.DisplayName = ""
 	humanoid.BreakJointsOnDeath = false
 	humanoid.RequiresNeck = false
 	humanoid.Health = humanoid.MaxHealth
@@ -281,16 +283,31 @@ local function onAttack(payload)
 	if not entry then
 		return
 	end
-	entry.tracks.attack:Play(0.1)
+	local archetype = EnemyVariants.GetArchetype(entry.archetypeIndex)
+	local cooldown = archetype.cooldown
+	local attackTrack = entry.tracks.attack
+	-- Stretch the attack animation to match the archetype's cooldown so a
+	-- Slasher (0.9s) snaps and a Quaker (2.4s) winds up slow.
+	local rawLength = attackTrack.Length
+	if rawLength <= 0 then
+		rawLength = 0.7
+	end
+	local speed = rawLength / cooldown
+	attackTrack:AdjustSpeed(speed)
+	attackTrack:Play(0.05)
+
 	if typeof(payload.origin) == "Vector3" and typeof(payload.yaw) == "number" then
-		SmashEffect.Play(
-			payload.origin,
-			payload.yaw,
-			entry.color,
-			entry.materialIndex,
-			entry.archetypeIndex,
-			payload.seed or 0
-		)
+		local origin = payload.origin
+		local yaw = payload.yaw
+		local seed = payload.seed or 0
+		local color = entry.color
+		local materialIndex = entry.materialIndex
+		local archetypeIndex = entry.archetypeIndex
+		-- Smash spawns at the end of the swing, matching server damage timing.
+		local delay = cooldown * 0.9
+		task.delay(delay, function()
+			SmashEffect.Play(origin, yaw, color, materialIndex, archetypeIndex, seed)
+		end)
 	end
 end
 

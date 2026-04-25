@@ -52,7 +52,7 @@ function PlatformService.ClampToPlatform(position: Vector3): Vector3
 	return platform.Position + rel
 end
 
-function PlatformService.RandomSpawnPosition(rng: Random): Vector3
+function PlatformService.RandomSpawnPosition(rng: Random, heightOffset: number): Vector3
 	if not platform then
 		return Vector3.zero
 	end
@@ -60,8 +60,7 @@ function PlatformService.RandomSpawnPosition(rng: Random): Vector3
 	local hz = platform.Size.Z * 0.5 - Constants.PLATFORM.EDGE_BUFFER
 	local x = (rng:NextNumber() * 2 - 1) * hx
 	local z = (rng:NextNumber() * 2 - 1) * hz
-	return platform.Position
-		+ Vector3.new(x, platform.Size.Y * 0.5 + Constants.ENEMY.HEIGHT_OFFSET, z)
+	return platform.Position + Vector3.new(x, platform.Size.Y * 0.5 + heightOffset, z)
 end
 
 return PlatformService
