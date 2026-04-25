@@ -286,15 +286,16 @@ local function onAttack(payload)
 	local archetype = EnemyVariants.GetArchetype(entry.archetypeIndex)
 	local cooldown = archetype.cooldown
 	local attackTrack = entry.tracks.attack
-	-- Stretch the attack animation to match the archetype's cooldown so a
-	-- Slasher (0.9s) snaps and a Quaker (2.4s) winds up slow.
+	-- Stretch the attack animation to fill the full cooldown so a Slasher
+	-- (0.9s) snaps and a Quaker (2.4s) winds up slow. Passing speed via Play
+	-- avoids the implicit speed=1 default reset that AdjustSpeed-then-Play hits.
 	local rawLength = attackTrack.Length
 	if rawLength <= 0 then
 		rawLength = 0.7
 	end
 	local speed = rawLength / cooldown
+	attackTrack:Play(0.05, 1, speed)
 	attackTrack:AdjustSpeed(speed)
-	attackTrack:Play(0.05)
 
 	if typeof(payload.origin) == "Vector3" and typeof(payload.yaw) == "number" then
 		local origin = payload.origin
