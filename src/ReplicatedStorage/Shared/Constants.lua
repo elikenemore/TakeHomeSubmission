@@ -21,11 +21,22 @@ Constants.SPAWN = {
 
 Constants.ENEMY = {
 	WALK_SPEED = 8,
-	ATTACK_RANGE = 5,
-	ATTACK_DAMAGE = 5,
-	ATTACK_COOLDOWN = 1.4,
 	HEIGHT_OFFSET = 3,
 	BASE_HEALTH = 50,
+	-- Soft separation between enemies so they don't pile on the same player.
+	SEPARATION_RADIUS = 3.5,
+	SEPARATION_STRENGTH = 4,
+	-- Damage lands at 60% of attack animation (~0.7s for asset 184574340).
+	DAMAGE_DELAY = 0.45,
+}
+
+Constants.SMASH = {
+	-- Geometry rises to peak then falls back. Total lifetime = RISE + HOLD + FALL.
+	RISE_TIME = 0.18,
+	HOLD_TIME = 0.12,
+	FALL_TIME = 0.55,
+	-- How far below the platform top shards start (so they punch up through it).
+	SUBMERGE_DEPTH = 6,
 }
 
 Constants.REPLICATION = {

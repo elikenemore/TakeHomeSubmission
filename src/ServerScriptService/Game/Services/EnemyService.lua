@@ -65,6 +65,7 @@ local function makeSpawnPayload(enemy: Enemy)
 		nameIndex = enemy.variant.nameIndex,
 		color = enemy.variant.color,
 		scale = enemy.variant.scale,
+		archetypeIndex = enemy.variant.archetypeIndex,
 	}
 end
 
@@ -123,8 +124,72 @@ local function getClosestPlayerOnPlatform(position: Vector3): (Player?, Vector3?
 	return closestPlayer, closestPos
 end
 
+-- Sums repulsion from nearby enemies so they spread out instead of stacking
+-- on the same target. Linear falloff inside SEPARATION_RADIUS.
+local function computeSeparation(self: Enemy): Vector3
+	local push = Vector3.zero
+	local radius = Constants.ENEMY.SEPARATION_RADIUS * self.variant.scale
+	for _, other in enemies do
+		if other.id == self.id then
+			continue
+		end
+		local diff = self.position - other.position
+		local flat = Vector3.new(diff.X, 0, diff.Z)
+		local d = flat.Magnitude
+		local combined = radius + Constants.ENEMY.SEPARATION_RADIUS * other.variant.scale
+		if d > 0.001 and d < combined then
+			local strength = (combined - d) / combined
+			push += flat.Unit * strength
+		end
+	end
+	return push * Constants.ENEMY.SEPARATION_STRENGTH
+end
+
+local function fireSmash(enemy: Enemy, target: Player)
+	local archetype = EnemyVariants.GetArchetype(enemy.variant.archetypeIndex)
+	-- Origin sits where the strike lands: in front of the enemy at platform top.
+	local platformY = PlatformService.GetTopY()
+	local forward = Vector3.new(-math.sin(enemy.yaw), 0, -math.cos(enemy.yaw))
+	local origin = Vector3.new(enemy.position.X, platformY, enemy.position.Z)
+		+ forward * (archetype.smashRadius * 0.4)
+	local payload = {
+		id = enemy.id,
+		origin = origin,
+		yaw = enemy.yaw,
+		seed = math.random(1, 2 ^ 31 - 1),
+	}
+	attackEvent:FireAllClients(payload)
+
+	-- Damage lands at the strike point in the animation, not the wind-up frame.
+	local damage = archetype.damage
+	task.delay(Constants.ENEMY.DAMAGE_DELAY, function()
+		if not enemies[enemy.id] then
+			return
+		end
+		local character = target.Character
+		if not character then
+			return
+		end
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not humanoid or humanoid.Health <= 0 then
+			return
+		end
+		local hrp = character:FindFirstChild("HumanoidRootPart")
+		if not hrp or not hrp:IsA("BasePart") then
+			return
+		end
+		-- Only land the hit if the player is still inside the smash radius.
+		local horiz = (Vector3.new(hrp.Position.X, 0, hrp.Position.Z)
+			- Vector3.new(origin.X, 0, origin.Z)).Magnitude
+		if horiz <= archetype.smashRadius then
+			humanoid:TakeDamage(damage)
+		end
+	end)
+end
+
 local function updateEnemy(enemy: Enemy, dt: number)
 	local target, targetPos = getClosestPlayerOnPlatform(enemy.position)
+	local archetype = EnemyVariants.GetArchetype(enemy.variant.archetypeIndex)
 
 	if not target or not targetPos then
 		enemy.state = STATE_IDLE
@@ -134,31 +199,35 @@ local function updateEnemy(enemy: Enemy, dt: number)
 	local diff = targetPos - enemy.position
 	local flat = Vector3.new(diff.X, 0, diff.Z)
 	local dist = flat.Magnitude
-	if dist <= Constants.ENEMY.ATTACK_RANGE then
+	if dist <= archetype.attackRange then
 		enemy.state = STATE_ATTACK
 		if dist > 0.001 then
-			enemy.yaw = math.atan2(flat.X, flat.Z)
+			-- Yaw is consumed as CFrame.Angles(0, yaw, 0); the rig's LookVector
+			-- needs to align with the chase direction, so negate flat components.
+			enemy.yaw = math.atan2(-flat.X, -flat.Z)
 		end
 		local now = os.clock()
 		if now >= enemy.nextAttackAt then
-			enemy.nextAttackAt = now + Constants.ENEMY.ATTACK_COOLDOWN
-			attackEvent:FireAllClients(enemy.id)
-			local character = target.Character
-			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-			if humanoid then
-				humanoid:TakeDamage(Constants.ENEMY.ATTACK_DAMAGE)
-			end
+			enemy.nextAttackAt = now + archetype.cooldown
+			fireSmash(enemy, target)
 		end
 		return
 	end
 
-	local dir = flat.Unit
+	local toTarget = if dist > 0.001 then flat.Unit else Vector3.zero
+	local separation = computeSeparation(enemy)
+	local dir = toTarget + separation
+	if dir.Magnitude < 0.01 then
+		enemy.state = STATE_IDLE
+		return
+	end
+	dir = dir.Unit
 	local step = math.min(Constants.ENEMY.WALK_SPEED * dt, dist)
 	local newPos = enemy.position + dir * step
 	newPos = PlatformService.ClampToPlatform(newPos)
 	newPos = Vector3.new(newPos.X, PlatformService.GetTopY() + Constants.ENEMY.HEIGHT_OFFSET, newPos.Z)
 	enemy.position = newPos
-	enemy.yaw = math.atan2(dir.X, dir.Z)
+	enemy.yaw = math.atan2(-dir.X, -dir.Z)
 	enemy.state = STATE_WALK
 end
 

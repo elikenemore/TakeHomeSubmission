@@ -17,6 +17,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Constants = require(Shared.Constants)
 local RemoteService = require(Shared.RemoteService)
 local EnemyVariants = require(Shared.EnemyVariants)
+local SmashEffect = require(Shared.SmashEffect)
 
 local ENEMY_TAG = "ReplicatedEnemy"
 local ENEMY_ID_ATTR = "EnemyId"
@@ -41,6 +42,9 @@ type Entry = {
 	interpStart: number,
 	interpDur: number,
 	state: number,
+	color: Color3,
+	materialIndex: number,
+	archetypeIndex: number,
 }
 
 local STATE_IDLE = 0
@@ -222,6 +226,9 @@ local function buildEnemy(payload): Entry?
 		interpStart = workspace:GetServerTimeNow(),
 		interpDur = 1 / Constants.REPLICATION.UPDATE_RATE_HZ,
 		state = STATE_IDLE,
+		color = payload.color,
+		materialIndex = payload.materialIndex,
+		archetypeIndex = payload.archetypeIndex,
 	}
 	return entry
 end
@@ -266,12 +273,25 @@ local function onDespawn(id: number)
 	end
 end
 
-local function onAttack(id: number)
-	local entry = enemies[id]
+local function onAttack(payload)
+	if typeof(payload) ~= "table" or typeof(payload.id) ~= "number" then
+		return
+	end
+	local entry = enemies[payload.id]
 	if not entry then
 		return
 	end
 	entry.tracks.attack:Play(0.1)
+	if typeof(payload.origin) == "Vector3" and typeof(payload.yaw) == "number" then
+		SmashEffect.Play(
+			payload.origin,
+			payload.yaw,
+			entry.color,
+			entry.materialIndex,
+			entry.archetypeIndex,
+			payload.seed or 0
+		)
+	end
 end
 
 local function onPositions(buf: buffer)
