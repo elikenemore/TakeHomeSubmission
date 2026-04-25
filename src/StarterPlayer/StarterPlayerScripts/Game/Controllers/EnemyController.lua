@@ -353,16 +353,30 @@ local function onAttack(payload)
 	local archetype = EnemyVariants.GetArchetype(entry.archetypeIndex)
 	local cooldown = archetype.cooldown
 	local attackTrack = entry.tracks.attack
-	-- Stretch the attack animation to fill the full cooldown so a Slasher
-	-- (0.9s) snaps and a Quaker (2.4s) winds up slow. Passing speed via Play
-	-- avoids the implicit speed=1 default reset that AdjustSpeed-then-Play hits.
+	-- Stretch the attack animation so its last frame lands exactly at the
+	-- smash moment (0.9 * cooldown). Without this, the track holds its final
+	-- pose for the rest of the cooldown and reads as a freeze. Passing speed
+	-- via Play() avoids the implicit speed=1 reset on Play(fadeTime).
 	local rawLength = attackTrack.Length
 	if rawLength <= 0 then
 		rawLength = 0.7
 	end
-	local speed = rawLength / cooldown
+	local swingDuration = cooldown * 0.9
+	local speed = rawLength / swingDuration
+	-- Idle underneath gives the rig a pose to settle into when attack stops.
+	if not entry.tracks.walk.IsPlaying and not entry.tracks.idle.IsPlaying then
+		entry.tracks.idle:Play(0)
+	end
 	attackTrack:Play(0.05, 1, speed)
 	attackTrack:AdjustSpeed(speed)
+
+	-- Stop the track right after the impact lands so it doesn't sit on the
+	-- last frame for the remainder of the cooldown.
+	task.delay(swingDuration, function()
+		if attackTrack.IsPlaying then
+			attackTrack:Stop(0.15)
+		end
+	end)
 
 	-- Wind-up plume around the enemy body during the swing.
 	SmashEffect.PlayWindup(entry.hrp.Position, entry.color)
@@ -375,8 +389,7 @@ local function onAttack(payload)
 		local materialIndex = entry.materialIndex
 		local archetypeIndex = entry.archetypeIndex
 		-- Smash spawns at the end of the swing, matching server damage timing.
-		local delay = cooldown * 0.9
-		task.delay(delay, function()
+		task.delay(swingDuration, function()
 			SmashEffect.Play(origin, yaw, color, materialIndex, archetypeIndex, seed)
 			maybeShakeForImpact(origin)
 		end)
