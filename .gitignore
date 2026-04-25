@@ -1,0 +1,11 @@
+# Ignore everything in repo root except src/ and a couple of project files
+/*
+!.gitignore
+!README.md
+!default.project.json
+!src/
+
+# Standard ignores within tracked dirs
+node_modules/
+*.log
+.DS_Store
