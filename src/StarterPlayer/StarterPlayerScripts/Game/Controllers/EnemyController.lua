@@ -55,6 +55,73 @@ local enemies: { [number]: Entry } = {}
 local enemyFolder: Folder
 local localPlayer: Player
 
+-- Camera shake state. Drives Humanoid.CameraOffset on the local character so
+-- impacts near the player rattle the view. Multiple shakes stack via max-amp.
+local shakeAmplitude = 0
+local shakeStartTime = 0
+local shakeDuration = 0
+local shakeRng = Random.new()
+
+local function triggerShake(amplitude: number, duration: number)
+	if amplitude <= 0 then
+		return
+	end
+	if amplitude >= shakeAmplitude or os.clock() - shakeStartTime > shakeDuration * 0.5 then
+		shakeAmplitude = math.max(shakeAmplitude, amplitude)
+		shakeStartTime = os.clock()
+		shakeDuration = duration
+	end
+end
+
+local function applyShake()
+	local character = localPlayer.Character
+	if not character then
+		return
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+	if shakeAmplitude <= 0 then
+		if humanoid.CameraOffset.Magnitude > 0.001 then
+			humanoid.CameraOffset = Vector3.zero
+		end
+		return
+	end
+	local elapsed = os.clock() - shakeStartTime
+	if elapsed >= shakeDuration then
+		shakeAmplitude = 0
+		humanoid.CameraOffset = Vector3.zero
+		return
+	end
+	-- Quadratic falloff so the rumble decays naturally.
+	local fade = 1 - (elapsed / shakeDuration)
+	local amp = shakeAmplitude * fade * fade
+	humanoid.CameraOffset = Vector3.new(
+		(shakeRng:NextNumber() - 0.5) * 2 * amp,
+		(shakeRng:NextNumber() - 0.5) * 2 * amp,
+		(shakeRng:NextNumber() - 0.5) * 2 * amp
+	)
+end
+
+local function maybeShakeForImpact(origin: Vector3)
+	local character = localPlayer.Character
+	if not character then
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	if not hrp or not hrp:IsA("BasePart") then
+		return
+	end
+	local dist = (hrp.Position - origin).Magnitude
+	local maxDist = Constants.CAMERA_SHAKE.MAX_DISTANCE
+	if dist > maxDist then
+		return
+	end
+	local strength = 1 - (dist / maxDist)
+	triggerShake(Constants.CAMERA_SHAKE.MAX_AMPLITUDE * strength, Constants.CAMERA_SHAKE.DURATION)
+end
+
 local spawnEvent: RemoteEvent
 local despawnEvent: RemoteEvent
 local positionsEvent: UnreliableRemoteEvent
@@ -297,6 +364,9 @@ local function onAttack(payload)
 	attackTrack:Play(0.05, 1, speed)
 	attackTrack:AdjustSpeed(speed)
 
+	-- Wind-up plume around the enemy body during the swing.
+	SmashEffect.PlayWindup(entry.hrp.Position, entry.color)
+
 	if typeof(payload.origin) == "Vector3" and typeof(payload.yaw) == "number" then
 		local origin = payload.origin
 		local yaw = payload.yaw
@@ -308,6 +378,7 @@ local function onAttack(payload)
 		local delay = cooldown * 0.9
 		task.delay(delay, function()
 			SmashEffect.Play(origin, yaw, color, materialIndex, archetypeIndex, seed)
+			maybeShakeForImpact(origin)
 		end)
 	end
 end
@@ -354,6 +425,7 @@ local function tick(_dt: number)
 		local t = math.clamp((now - entry.interpStart) / entry.interpDur, 0, 1.25)
 		entry.hrp.CFrame = entry.prevCF:Lerp(entry.targetCF, t)
 	end
+	applyShake()
 end
 
 local function handleClickRaycast()

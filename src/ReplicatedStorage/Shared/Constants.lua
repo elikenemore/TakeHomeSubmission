@@ -39,6 +39,27 @@ Constants.SMASH = {
 	FALL_TIME = 0.55,
 	-- How far below the platform top shards start (so they punch up through it).
 	SUBMERGE_DEPTH = 6,
+	-- PointLight pulse at impact.
+	LIGHT_BRIGHTNESS = 8,
+	LIGHT_RANGE = 32,
+	LIGHT_DURATION = 0.45,
+	-- Expanding flat ring at ground level.
+	SHOCKWAVE_DURATION = 0.5,
+	SHOCKWAVE_SCALE = 2.6,
+	-- "Launcher" parts that fling high and fall back.
+	LAUNCHER_COUNT = 6,
+	LAUNCHER_RISE_TIME = 0.45,
+	LAUNCHER_FALL_TIME = 0.85,
+	LAUNCHER_PEAK_HEIGHT = 16,
+	-- Pre-impact windup burst around the enemy.
+	WINDUP_DURATION = 0.5,
+}
+
+Constants.CAMERA_SHAKE = {
+	-- Linear falloff: full intensity at impact, zero past MAX_DISTANCE.
+	MAX_DISTANCE = 65,
+	MAX_AMPLITUDE = 1.0,
+	DURATION = 0.45,
 }
 
 Constants.REPLICATION = {
