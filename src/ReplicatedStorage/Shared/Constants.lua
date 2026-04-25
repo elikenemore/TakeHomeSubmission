@@ -30,6 +30,11 @@ Constants.ENEMY = {
 	-- (which equals the stretched attack-animation length on the client).
 	-- Slightly under 1.0 so the hit lands just before the next attack queues.
 	DAMAGE_DELAY_FRACTION = 0.9,
+	-- Fraction of the raw attack animation asset where the visible swing
+	-- peaks. Everything past this is recovery / dead frames the asset bakes
+	-- in, and would otherwise read as a freeze. Client stretches `0..PEAK`
+	-- to cover the swing window and Stops the track at PEAK.
+	ATTACK_ANIM_PEAK_FRACTION = 0.55,
 }
 
 Constants.SMASH = {

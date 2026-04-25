@@ -353,16 +353,18 @@ local function onAttack(payload)
 	local archetype = EnemyVariants.GetArchetype(entry.archetypeIndex)
 	local cooldown = archetype.cooldown
 	local attackTrack = entry.tracks.attack
-	-- Stretch the attack animation so its last frame lands exactly at the
-	-- smash moment (0.9 * cooldown). Without this, the track holds its final
-	-- pose for the rest of the cooldown and reads as a freeze. Passing speed
-	-- via Play() avoids the implicit speed=1 reset on Play(fadeTime).
+	-- The raw asset has trailing recovery frames after the visible swing
+	-- peaks. We only stretch `0..PEAK` of the asset to cover the swing window
+	-- and Stop the track at the peak, so the recovery never plays and the
+	-- rig never freezes on the last frame. Passing speed via Play() avoids
+	-- the implicit speed=1 reset that Play(fadeTime) does on its own.
 	local rawLength = attackTrack.Length
 	if rawLength <= 0 then
 		rawLength = 0.7
 	end
 	local swingDuration = cooldown * 0.9
-	local speed = rawLength / swingDuration
+	local visibleSwing = rawLength * Constants.ENEMY.ATTACK_ANIM_PEAK_FRACTION
+	local speed = visibleSwing / swingDuration
 	-- Idle underneath gives the rig a pose to settle into when attack stops.
 	if not entry.tracks.walk.IsPlaying and not entry.tracks.idle.IsPlaying then
 		entry.tracks.idle:Play(0)
