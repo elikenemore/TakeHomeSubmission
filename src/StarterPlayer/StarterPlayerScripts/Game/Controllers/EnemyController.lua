@@ -85,6 +85,15 @@ local function scaleRig(model: Model, scale: number)
 end
 
 local function styleRig(model: Model, color: Color3, material: Enum.Material)
+	-- The default Animate LocalScript ships with rigs returned by
+	-- CreateHumanoidModelFromDescription and would clobber our manual
+	-- AnimationTracks. BodyColors and the face/torso decals also need to
+	-- go so the rolled color/material reads cleanly.
+	for _, child in model:GetChildren() do
+		if child:IsA("LocalScript") or child:IsA("Script") or child.ClassName == "BodyColors" then
+			child:Destroy()
+		end
+	end
 	for _, descendant in model:GetDescendants() do
 		if descendant:IsA("BasePart") then
 			descendant.Color = color
@@ -93,8 +102,7 @@ local function styleRig(model: Model, color: Color3, material: Enum.Material)
 			descendant.Massless = true
 			descendant.CanQuery = descendant.Name ~= "HumanoidRootPart"
 			descendant.CanTouch = false
-		elseif descendant:IsA("Decal") then
-			-- Drop classic faces so the random color reads cleanly.
+		elseif descendant:IsA("Decal") or descendant:IsA("CharacterMesh") or descendant:IsA("Shirt") or descendant:IsA("Pants") then
 			descendant:Destroy()
 		end
 	end
@@ -159,22 +167,35 @@ local function buildEnemy(payload): Entry?
 	styleRig(model, payload.color, material)
 	scaleRig(model, payload.scale)
 
-	hrp.Anchored = true
 	hrp.Transparency = 1
-	humanoid.PlatformStand = true
+
+	local head = model:FindFirstChild("Head")
+	if head and head:IsA("BasePart") then
+		attachNameTag(head, enemyName)
+	end
+
+	-- Parent before configuring the Humanoid + loading animations so the
+	-- Animator runs in a fully initialised hierarchy.
+	model.Parent = enemyFolder
+	hrp.CFrame = payload.cf
+	hrp.Anchored = true
+
 	humanoid.AutoRotate = false
 	humanoid.HealthDisplayDistance = 0
 	humanoid.NameDisplayDistance = 0
 	humanoid.BreakJointsOnDeath = false
 	humanoid.RequiresNeck = false
-	humanoid.WalkSpeed = 0
 	humanoid.Health = humanoid.MaxHealth
 
-	local animator = humanoid:FindFirstChildOfClass("Animator")
-	if not animator then
-		animator = Instance.new("Animator")
-		animator.Parent = humanoid
+	-- Replace the bundled Animator with a fresh client-owned one. The default
+	-- one comes from CreateHumanoidModelFromDescription as a "Player" rig and
+	-- can refuse to advance when no Player owns the Humanoid.
+	local oldAnimator = humanoid:FindFirstChildOfClass("Animator")
+	if oldAnimator then
+		oldAnimator:Destroy()
 	end
+	local animator = Instance.new("Animator")
+	animator.Parent = humanoid
 
 	local tracks: Tracks = {
 		idle = loadTrack(animator, Constants.ANIMATIONS.IDLE),
@@ -187,14 +208,6 @@ local function buildEnemy(payload): Entry?
 	tracks.idle.Priority = Enum.AnimationPriority.Idle
 	tracks.walk.Priority = Enum.AnimationPriority.Movement
 	tracks.attack.Priority = Enum.AnimationPriority.Action
-
-	local head = model:FindFirstChild("Head")
-	if head and head:IsA("BasePart") then
-		attachNameTag(head, enemyName)
-	end
-
-	model.Parent = enemyFolder
-	hrp.CFrame = payload.cf
 	tracks.idle:Play(0)
 
 	local entry: Entry = {

@@ -5,10 +5,8 @@
 local Constants = {}
 
 Constants.PLATFORM = {
-	SIZE = Vector3.new(50, 1, 50),
-	POSITION = Vector3.new(0, 5, 0),
-	COLOR = Color3.fromRGB(70, 75, 85),
-	MATERIAL = Enum.Material.Concrete,
+	-- Platform geometry is read from `Workspace.Platform` at runtime.
+	-- This buffer keeps spawned enemies from clipping the edge.
 	EDGE_BUFFER = 1.5,
 }
 
@@ -19,8 +17,6 @@ Constants.SPAWN = {
 	MAX_RATE = 30,
 	MIN_CAP = 0,
 	MAX_CAP = 250,
-	RATE_STEP = 0.5,
-	CAP_STEP = 5,
 }
 
 Constants.ENEMY = {

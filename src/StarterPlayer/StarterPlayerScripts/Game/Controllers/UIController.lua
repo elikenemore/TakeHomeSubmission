@@ -1,8 +1,8 @@
 --!strict
 -- Spawner control panel.
--- Ships a single ScreenGui with adjustable spawn rate, max enemy count,
--- and a Kill All button. Server is authoritative; client just nudges
--- values and re-renders whatever the server broadcasts back.
+-- Two TextBox inputs (spawn rate, max count) and a Kill All button.
+-- Server is authoritative; client sends edits, then re-renders whatever the
+-- server broadcasts back.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -18,8 +18,8 @@ local settings = {
 	maxCount = Constants.SPAWN.DEFAULT_MAX_COUNT,
 }
 
-local spawnRateLabel: TextLabel
-local maxCountLabel: TextLabel
+local rateBox: TextBox
+local capBox: TextBox
 
 local settingsEvent: RemoteEvent
 local killAllEvent: RemoteEvent
@@ -32,48 +32,44 @@ local function pushSettings()
 	})
 end
 
-local function refreshLabels()
-	if spawnRateLabel then
-		spawnRateLabel.Text = string.format("Spawn Rate  %.1f / s", settings.spawnRate)
+local function refreshInputs()
+	if rateBox then
+		rateBox.Text = string.format("%.1f", settings.spawnRate)
 	end
-	if maxCountLabel then
-		maxCountLabel.Text = string.format("Max Enemies  %d", settings.maxCount)
+	if capBox then
+		capBox.Text = tostring(settings.maxCount)
 	end
 end
 
-local function adjustRate(delta: number)
-	settings.spawnRate = math.clamp(
-		settings.spawnRate + delta,
-		Constants.SPAWN.MIN_RATE,
-		Constants.SPAWN.MAX_RATE
-	)
-	refreshLabels()
+local function commitRate(text: string)
+	local n = tonumber(text)
+	if not n then
+		refreshInputs()
+		return
+	end
+	settings.spawnRate = math.clamp(n, Constants.SPAWN.MIN_RATE, Constants.SPAWN.MAX_RATE)
+	refreshInputs()
 	pushSettings()
 end
 
-local function adjustCap(delta: number)
-	settings.maxCount = math.clamp(
-		settings.maxCount + delta,
-		Constants.SPAWN.MIN_CAP,
-		Constants.SPAWN.MAX_CAP
-	)
-	refreshLabels()
+local function commitCap(text: string)
+	local n = tonumber(text)
+	if not n then
+		refreshInputs()
+		return
+	end
+	settings.maxCount = math.clamp(math.floor(n), Constants.SPAWN.MIN_CAP, Constants.SPAWN.MAX_CAP)
+	refreshInputs()
 	pushSettings()
 end
 
-local function styleButton(button: TextButton, color: Color3)
-	button.BackgroundColor3 = color
-	button.AutoButtonColor = true
-	button.BorderSizePixel = 0
-	button.TextColor3 = Color3.fromRGB(245, 245, 245)
-	button.Font = Enum.Font.GothamBold
-	button.TextSize = 16
+local function styleCorner(instance: Instance, radius: number)
 	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 6)
-	corner.Parent = button
+	corner.CornerRadius = UDim.new(0, radius)
+	corner.Parent = instance
 end
 
-local function makeRow(parent: Instance, layoutOrder: number): (Frame, TextLabel, TextButton, TextButton)
+local function makeInputRow(parent: Instance, layoutOrder: number, labelText: string): TextBox
 	local row = Instance.new("Frame")
 	row.LayoutOrder = layoutOrder
 	row.Size = UDim2.new(1, 0, 0, 36)
@@ -82,7 +78,7 @@ local function makeRow(parent: Instance, layoutOrder: number): (Frame, TextLabel
 
 	local layout = Instance.new("UIListLayout")
 	layout.FillDirection = Enum.FillDirection.Horizontal
-	layout.Padding = UDim.new(0, 6)
+	layout.Padding = UDim.new(0, 8)
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.VerticalAlignment = Enum.VerticalAlignment.Center
 	layout.Parent = row
@@ -91,28 +87,33 @@ local function makeRow(parent: Instance, layoutOrder: number): (Frame, TextLabel
 	label.LayoutOrder = 1
 	label.Size = UDim2.new(1, -90, 1, 0)
 	label.BackgroundTransparency = 1
-	label.Text = ""
+	label.Text = labelText
 	label.TextColor3 = Color3.fromRGB(225, 225, 230)
 	label.Font = Enum.Font.Gotham
-	label.TextSize = 15
+	label.TextSize = 14
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.Parent = row
 
-	local minus = Instance.new("TextButton")
-	minus.LayoutOrder = 2
-	minus.Size = UDim2.fromOffset(36, 32)
-	minus.Text = "−"
-	minus.Parent = row
-	styleButton(minus, Color3.fromRGB(70, 72, 84))
+	local box = Instance.new("TextBox")
+	box.LayoutOrder = 2
+	box.Size = UDim2.fromOffset(80, 32)
+	box.BackgroundColor3 = Color3.fromRGB(50, 52, 62)
+	box.BorderSizePixel = 0
+	box.TextColor3 = Color3.fromRGB(245, 245, 245)
+	box.Font = Enum.Font.GothamMedium
+	box.TextSize = 16
+	box.PlaceholderText = "..."
+	box.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
+	box.ClearTextOnFocus = false
+	box.Parent = row
+	styleCorner(box, 6)
 
-	local plus = Instance.new("TextButton")
-	plus.LayoutOrder = 3
-	plus.Size = UDim2.fromOffset(36, 32)
-	plus.Text = "+"
-	plus.Parent = row
-	styleButton(plus, Color3.fromRGB(70, 72, 84))
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(80, 85, 100)
+	stroke.Transparency = 0.5
+	stroke.Parent = box
 
-	return row, label, minus, plus
+	return box
 end
 
 local function buildUI()
@@ -125,17 +126,13 @@ local function buildUI()
 
 	local panel = Instance.new("Frame")
 	panel.Name = "Panel"
-	panel.AnchorPoint = Vector2.new(0, 0)
 	panel.Position = UDim2.new(0, 16, 0, 64)
 	panel.Size = UDim2.fromOffset(280, 220)
 	panel.BackgroundColor3 = Color3.fromRGB(24, 25, 30)
 	panel.BackgroundTransparency = 0.05
 	panel.BorderSizePixel = 0
 	panel.Parent = screenGui
-
-	local panelCorner = Instance.new("UICorner")
-	panelCorner.CornerRadius = UDim.new(0, 10)
-	panelCorner.Parent = panel
+	styleCorner(panel, 10)
 
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = Color3.fromRGB(60, 65, 80)
@@ -171,42 +168,48 @@ local function buildUI()
 	subtitle.LayoutOrder = 2
 	subtitle.Size = UDim2.new(1, 0, 0, 16)
 	subtitle.BackgroundTransparency = 1
-	subtitle.Text = "Adjust live · synced to server"
+	subtitle.Text = "Type a value, press Enter"
 	subtitle.TextColor3 = Color3.fromRGB(150, 155, 170)
 	subtitle.Font = Enum.Font.Gotham
 	subtitle.TextSize = 12
 	subtitle.TextXAlignment = Enum.TextXAlignment.Left
 	subtitle.Parent = panel
 
-	local _, rateLabel, rateMinus, ratePlus = makeRow(panel, 3)
-	spawnRateLabel = rateLabel
-	rateMinus.MouseButton1Click:Connect(function()
-		adjustRate(-Constants.SPAWN.RATE_STEP)
-	end)
-	ratePlus.MouseButton1Click:Connect(function()
-		adjustRate(Constants.SPAWN.RATE_STEP)
+	rateBox = makeInputRow(panel, 3, "Spawn Rate / s")
+	rateBox.FocusLost:Connect(function(enterPressed)
+		if enterPressed then
+			commitRate(rateBox.Text)
+		else
+			refreshInputs()
+		end
 	end)
 
-	local _, capLabel, capMinus, capPlus = makeRow(panel, 4)
-	maxCountLabel = capLabel
-	capMinus.MouseButton1Click:Connect(function()
-		adjustCap(-Constants.SPAWN.CAP_STEP)
-	end)
-	capPlus.MouseButton1Click:Connect(function()
-		adjustCap(Constants.SPAWN.CAP_STEP)
+	capBox = makeInputRow(panel, 4, "Max Enemies")
+	capBox.FocusLost:Connect(function(enterPressed)
+		if enterPressed then
+			commitCap(capBox.Text)
+		else
+			refreshInputs()
+		end
 	end)
 
 	local killAll = Instance.new("TextButton")
 	killAll.LayoutOrder = 5
 	killAll.Size = UDim2.new(1, 0, 0, 38)
 	killAll.Text = "KILL ALL ENEMIES"
+	killAll.BackgroundColor3 = Color3.fromRGB(165, 50, 60)
+	killAll.AutoButtonColor = true
+	killAll.BorderSizePixel = 0
+	killAll.TextColor3 = Color3.fromRGB(245, 245, 245)
+	killAll.Font = Enum.Font.GothamBold
+	killAll.TextSize = 16
 	killAll.Parent = panel
-	styleButton(killAll, Color3.fromRGB(165, 50, 60))
+	styleCorner(killAll, 6)
 	killAll.MouseButton1Click:Connect(function()
 		killAllEvent:FireServer()
 	end)
 
-	refreshLabels()
+	refreshInputs()
 end
 
 function UIController.Init()
@@ -228,7 +231,7 @@ function UIController.Start()
 		if typeof(payload.maxCount) == "number" then
 			settings.maxCount = payload.maxCount
 		end
-		refreshLabels()
+		refreshInputs()
 	end)
 
 	task.spawn(function()
@@ -242,7 +245,7 @@ function UIController.Start()
 			if typeof(payload.maxCount) == "number" then
 				settings.maxCount = payload.maxCount
 			end
-			refreshLabels()
+			refreshInputs()
 		end
 	end)
 end

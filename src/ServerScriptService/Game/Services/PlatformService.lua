@@ -1,6 +1,6 @@
 --!strict
--- Builds and exposes the 50x50 enemy platform.
--- Spawn position queries and on-platform predicates live here so EnemyService
+-- Reads the existing `Workspace.Platform` part and exposes spatial helpers
+-- (on-platform predicate, edge clamping, random spawn point) so EnemyService
 -- never has to know the part directly.
 
 local Workspace = game:GetService("Workspace")
@@ -9,40 +9,18 @@ local Constants = require(game:GetService("ReplicatedStorage").Shared.Constants)
 
 local PlatformService = {}
 
-local platform: Part? = nil
+local platform: BasePart? = nil
 
 function PlatformService.Init()
-	local part = Instance.new("Part")
-	part.Name = "EnemyPlatform"
-	part.Anchored = true
-	part.CanCollide = true
-	part.Size = Constants.PLATFORM.SIZE
-	part.Position = Constants.PLATFORM.POSITION
-	part.Color = Constants.PLATFORM.COLOR
-	part.Material = Constants.PLATFORM.MATERIAL
-	part.TopSurface = Enum.SurfaceType.Smooth
-	part.BottomSurface = Enum.SurfaceType.Smooth
-	part.Parent = Workspace
-	platform = part
-
-	local existingSpawn = Workspace:FindFirstChild("PlayerSpawn")
-	if not existingSpawn then
-		local spawn = Instance.new("SpawnLocation")
-		spawn.Name = "PlayerSpawn"
-		spawn.Anchored = true
-		spawn.CanCollide = true
-		spawn.Size = Vector3.new(6, 1, 6)
-		spawn.Position = Constants.PLATFORM.POSITION
-			+ Vector3.new(0, Constants.PLATFORM.SIZE.Y * 0.5 + 0.5, 0)
-		spawn.Color = Color3.fromRGB(60, 200, 110)
-		spawn.Material = Enum.Material.Neon
-		spawn.TopSurface = Enum.SurfaceType.Smooth
-		spawn.BottomSurface = Enum.SurfaceType.Smooth
-		spawn.Parent = Workspace
+	local part = Workspace:WaitForChild("Platform", 5)
+	if not part or not part:IsA("BasePart") then
+		warn("[PlatformService] Workspace.Platform is missing or not a BasePart")
+		return
 	end
+	platform = part
 end
 
-function PlatformService.GetPart(): Part?
+function PlatformService.GetPart(): BasePart?
 	return platform
 end
 

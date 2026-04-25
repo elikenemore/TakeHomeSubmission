@@ -31,8 +31,8 @@ EnemyVariants.NAMES = {
 	"Stalker",
 }
 
-EnemyVariants.MIN_SCALE = 0.7
-EnemyVariants.MAX_SCALE = 1.6
+EnemyVariants.MIN_SCALE = 0.6
+EnemyVariants.MAX_SCALE = 2.0
 
 export type Variant = {
 	color: Color3,
