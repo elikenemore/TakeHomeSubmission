@@ -1,4 +1,4 @@
-# Cave-Game Take-Home — Enemy Spawner
+# Enemy Spawner
 
 Submission for the WKEY Studios Gameplay Engineer take-home (LUAU programmer, due 2026-04-26).
 
