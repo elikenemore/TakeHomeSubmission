@@ -60,6 +60,13 @@ local enemyFolder: Folder
 local localPlayer: Player
 local frameCounter = 0
 
+-- Reusable scratch buffers for Workspace:BulkMoveTo. Keeping them module-scoped
+-- means tick() does no per-frame array allocation; we just `table.clear` and
+-- refill. BulkMoveTo collapses N CFrame property writes into one engine call,
+-- which is the dominant per-frame cost when hundreds of rigs are visible.
+local bulkParts: { BasePart } = {}
+local bulkCFrames: { CFrame } = {}
+
 -- Performance mode: when on, new spawns skip name tags + animations + VFX,
 -- and existing rigs are stripped on toggle. Camera shake and smash effects
 -- short-circuit. Toggling off restores name tags + animators on every
@@ -581,6 +588,10 @@ local function tick(_dt: number)
 	local cullSq = Constants.PERFORMANCE.CLIENT_CULL_DISTANCE ^ 2
 	local farFrames = Constants.PERFORMANCE.CLIENT_THROTTLE_FRAMES
 
+	table.clear(bulkParts)
+	table.clear(bulkCFrames)
+	local moveCount = 0
+
 	for _, entry in enemies do
 		if not entry.model then
 			continue
@@ -614,8 +625,18 @@ local function tick(_dt: number)
 			continue
 		end
 		local t = math.clamp((now - entry.interpStart) / entry.interpDur, 0, 1.25)
-		entry.hrp.CFrame = entry.prevCF:Lerp(entry.targetCF, t)
+		moveCount += 1
+		bulkParts[moveCount] = entry.hrp
+		bulkCFrames[moveCount] = entry.prevCF:Lerp(entry.targetCF, t)
 	end
+
+	-- One C++ call replaces N CFrame property writes. FireCFrameChanged keeps
+	-- attachments / welds / streaming aware of the move; the alternative
+	-- (FireAllEvents) is unnecessary work for anchored rigs with no welds.
+	if moveCount > 0 then
+		Workspace:BulkMoveTo(bulkParts, bulkCFrames, Enum.BulkMoveMode.FireCFrameChanged)
+	end
+
 	if not perfMode then
 		applyShake()
 	end

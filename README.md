@@ -131,6 +131,12 @@ Profiled per-tick costs at extreme densities (40 × 40 platform):
   state machine fighting our CFrame writes.
 - Each frame the client **lerps `prevCF → targetCF`** over the 100 ms tick
   window, so visual movement looks smooth despite the 10 Hz update rate.
+- **Bulk move.** Per-rig CFrame writes go through the engine's PVInstance
+  event path; at hundreds of visible rigs that loop dominates the client
+  tick. The lerp instead fills two reusable scratch arrays
+  (`bulkParts`, `bulkCFrames`) and dispatches them through
+  `Workspace:BulkMoveTo(..., FireCFrameChanged)` — one C++ call per
+  frame regardless of population.
 - **Three-band LOD.** Per-frame, each enemy is classified by squared
   camera distance:
   - **Near:** full lerp every frame.
