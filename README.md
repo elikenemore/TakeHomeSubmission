@@ -4,7 +4,9 @@ Submission for the WKEY Studios Gameplay Engineer take-home (LUAU programmer, du
 
 ## What it does
 
-- Builds a **50 × 50 stud platform** at runtime and spawns enemies on it.
+- A **50 × 50 stud slate platform** sits at the origin (defined in
+  `default.project.json` so a fresh `rojo build` produces a complete
+  place); enemies spawn on top of it.
 - **1 enemy / second**, capped at **20 concurrent** by default; both values are
   live-tunable from an in-game **HUD panel** (per-player UI sends to a
   server-authoritative settings remote).
@@ -35,7 +37,7 @@ ReplicatedStorage/Shared/
 ServerScriptService/Game/
   Bootstrap.server.lua       -- one Script that requires every Service ModuleScript
   Services/
-    PlatformService.lua      -- builds the platform, on-platform/clamping helpers
+    PlatformService.lua      -- reads Workspace.Platform; on-platform / clamping / random-spawn helpers
     EnemyService.lua         -- spawn loop, chase AI, attack, custom replication
 
 StarterPlayer/StarterPlayerScripts/Game/
