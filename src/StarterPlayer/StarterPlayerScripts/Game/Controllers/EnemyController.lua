@@ -35,7 +35,7 @@ type Entry = {
 	model: Model,
 	hrp: BasePart,
 	humanoid: Humanoid,
-	tracks: Tracks,
+	tracks: Tracks?,
 	currentAnim: string,
 	prevCF: CFrame,
 	targetCF: CFrame,
@@ -44,7 +44,11 @@ type Entry = {
 	state: number,
 	color: Color3,
 	materialIndex: number,
+	nameIndex: number,
 	archetypeIndex: number,
+	perfStripped: boolean,
+	parentedTo: Folder?,
+	visible: boolean,
 }
 
 local STATE_IDLE = 0
@@ -54,6 +58,20 @@ local STATE_ATTACK = 2
 local enemies: { [number]: Entry } = {}
 local enemyFolder: Folder
 local localPlayer: Player
+local frameCounter = 0
+
+-- Performance mode: when on, new spawns skip name tags + animations + VFX,
+-- and existing rigs are stripped on toggle. Camera shake and smash effects
+-- short-circuit. Toggling off restores name tags + animators on every
+-- already-spawned rig, so the change applies to existing enemies too.
+local perfMode = false
+
+-- Concurrent smash cap. Each Play() bumps the counter, a delayed task
+-- decrements it after the longest tween TTL. New smashes past the cap
+-- are dropped — bounds VFX cost when the spawner is wide open.
+local activeSmashes = 0
+local smashTtl = Constants.SMASH.RISE_TIME + Constants.SMASH.HOLD_TIME + Constants.SMASH.FALL_TIME
+	+ Constants.SMASH.LAUNCHER_RISE_TIME + Constants.SMASH.LAUNCHER_FALL_TIME
 
 -- Camera shake state. Drives Humanoid.CameraOffset on the local character so
 -- impacts near the player rattle the view. Multiple shakes stack via max-amp.
@@ -105,6 +123,9 @@ local function applyShake()
 end
 
 local function maybeShakeForImpact(origin: Vector3)
+	if perfMode then
+		return
+	end
 	local character = localPlayer.Character
 	if not character then
 		return
@@ -240,9 +261,11 @@ local function buildEnemy(payload): Entry?
 
 	hrp.Transparency = 1
 
-	local head = model:FindFirstChild("Head")
-	if head and head:IsA("BasePart") then
-		attachNameTag(head, enemyName)
+	if not perfMode then
+		local head = model:FindFirstChild("Head")
+		if head and head:IsA("BasePart") then
+			attachNameTag(head, enemyName)
+		end
 	end
 
 	-- Parent before configuring the Humanoid + loading animations so the
@@ -260,15 +283,120 @@ local function buildEnemy(payload): Entry?
 	humanoid.RequiresNeck = false
 	humanoid.Health = humanoid.MaxHealth
 
-	-- Replace the bundled Animator with a fresh client-owned one. The default
-	-- one comes from CreateHumanoidModelFromDescription as a "Player" rig and
-	-- can refuse to advance when no Player owns the Humanoid.
+	-- Drop the bundled Animator unconditionally. The default one comes from
+	-- CreateHumanoidModelFromDescription as a "Player" rig and can refuse to
+	-- advance when no Player owns the Humanoid; in perf mode we want it gone
+	-- so the rig stays in bind pose with zero animation cost.
 	local oldAnimator = humanoid:FindFirstChildOfClass("Animator")
 	if oldAnimator then
 		oldAnimator:Destroy()
 	end
+
+	local tracks: Tracks? = nil
+	if not perfMode then
+		local animator = Instance.new("Animator")
+		animator.Parent = humanoid
+
+		tracks = {
+			idle = loadTrack(animator, Constants.ANIMATIONS.IDLE),
+			walk = loadTrack(animator, Constants.ANIMATIONS.WALK),
+			attack = loadTrack(animator, Constants.ANIMATIONS.ATTACK),
+		} :: Tracks
+		local t = tracks :: Tracks
+		t.idle.Looped = true
+		t.walk.Looped = true
+		t.attack.Looped = false
+		t.idle.Priority = Enum.AnimationPriority.Idle
+		t.walk.Priority = Enum.AnimationPriority.Movement
+		t.attack.Priority = Enum.AnimationPriority.Action
+		t.idle:Play(0)
+	end
+
+	local entry: Entry = {
+		id = payload.id,
+		model = model,
+		hrp = hrp,
+		humanoid = humanoid,
+		tracks = tracks,
+		currentAnim = if perfMode then "none" else "idle",
+		prevCF = payload.cf,
+		targetCF = payload.cf,
+		interpStart = workspace:GetServerTimeNow(),
+		interpDur = 1 / Constants.REPLICATION.UPDATE_RATE_HZ,
+		state = STATE_IDLE,
+		color = payload.color,
+		materialIndex = payload.materialIndex,
+		nameIndex = payload.nameIndex,
+		archetypeIndex = payload.archetypeIndex,
+		perfStripped = perfMode,
+		parentedTo = enemyFolder,
+		visible = true,
+	}
+	return entry
+end
+
+-- Strip name tag + stop animations on an existing rig. Used when toggling
+-- perf mode on at runtime so we don't need to rebuild every enemy.
+--
+-- Stopping a non-looped Action-priority track mid-play (the attack swing)
+-- leaves Motor6D.Transform at the last evaluated frame, which reads as a
+-- freeze. So we also destroy the Animator (no further pose evaluation) and
+-- snap every Motor6D.Transform to identity to put the rig back in bind pose.
+local function stripRigForPerfMode(entry: Entry)
+	if entry.perfStripped then
+		return
+	end
+	entry.perfStripped = true
+	local head = entry.model:FindFirstChild("Head")
+	if head then
+		local nameTag = head:FindFirstChild("NameTag")
+		if nameTag then
+			nameTag:Destroy()
+		end
+	end
+	if entry.tracks then
+		for _, track in entry.tracks do
+			if track.IsPlaying then
+				track:Stop(0)
+			end
+		end
+	end
+	entry.tracks = nil
+	local animator = entry.humanoid:FindFirstChildOfClass("Animator")
+	if animator then
+		animator:Destroy()
+	end
+	for _, descendant in entry.model:GetDescendants() do
+		if descendant:IsA("Motor6D") then
+			descendant.Transform = CFrame.identity
+		end
+	end
+	entry.currentAnim = "none"
+end
+
+-- Inverse of stripRigForPerfMode. Re-attaches the name tag, rebuilds the
+-- Animator + idle/walk/attack tracks, and starts idle. Called for each live
+-- enemy when perf mode is toggled off so existing rigs come back instead of
+-- staying stripped until they're replaced.
+local function restoreRigFromPerfMode(entry: Entry)
+	if not entry.perfStripped then
+		return
+	end
+	entry.perfStripped = false
+
+	local head = entry.model:FindFirstChild("Head")
+	if head and head:IsA("BasePart") and not head:FindFirstChild("NameTag") then
+		attachNameTag(head, EnemyVariants.GetName(entry.nameIndex))
+	end
+
+	-- Strip should have destroyed the Animator; create a fresh one. Defensive
+	-- destroy first in case toggling raced with something else.
+	local oldAnimator = entry.humanoid:FindFirstChildOfClass("Animator")
+	if oldAnimator then
+		oldAnimator:Destroy()
+	end
 	local animator = Instance.new("Animator")
-	animator.Parent = humanoid
+	animator.Parent = entry.humanoid
 
 	local tracks: Tracks = {
 		idle = loadTrack(animator, Constants.ANIMATIONS.IDLE),
@@ -281,37 +409,33 @@ local function buildEnemy(payload): Entry?
 	tracks.idle.Priority = Enum.AnimationPriority.Idle
 	tracks.walk.Priority = Enum.AnimationPriority.Movement
 	tracks.attack.Priority = Enum.AnimationPriority.Action
-	tracks.idle:Play(0)
+	entry.tracks = tracks
 
-	local entry: Entry = {
-		id = payload.id,
-		model = model,
-		hrp = hrp,
-		humanoid = humanoid,
-		tracks = tracks,
-		currentAnim = "idle",
-		prevCF = payload.cf,
-		targetCF = payload.cf,
-		interpStart = workspace:GetServerTimeNow(),
-		interpDur = 1 / Constants.REPLICATION.UPDATE_RATE_HZ,
-		state = STATE_IDLE,
-		color = payload.color,
-		materialIndex = payload.materialIndex,
-		archetypeIndex = payload.archetypeIndex,
-	}
-	return entry
+	-- Drive the right loop based on the last replicated state instead of
+	-- always idling — otherwise a walking enemy reads as frozen for one tick.
+	if entry.state == STATE_WALK then
+		tracks.walk:Play(0)
+		entry.currentAnim = "walk"
+	else
+		tracks.idle:Play(0)
+		entry.currentAnim = "idle"
+	end
 end
 
 local function setAnim(entry: Entry, name: string, fade: number?)
+	if perfMode or entry.perfStripped or not entry.tracks then
+		return
+	end
 	if entry.currentAnim == name then
 		return
 	end
-	for trackName, track in entry.tracks do
+	local tracks = entry.tracks
+	for trackName, track in tracks do
 		if trackName ~= name and track.IsPlaying then
 			track:Stop(fade or 0.15)
 		end
 	end
-	local target = (entry.tracks :: any)[name]
+	local target = (tracks :: any)[name]
 	if target and not target.IsPlaying then
 		target:Play(fade or 0.15)
 	end
@@ -352,7 +476,15 @@ local function onAttack(payload)
 	end
 	local archetype = EnemyVariants.GetArchetype(entry.archetypeIndex)
 	local cooldown = archetype.cooldown
-	local attackTrack = entry.tracks.attack
+	local swingDuration = cooldown * 0.9
+
+	-- Perf mode: skip every visual; server still does damage on schedule.
+	if perfMode or entry.perfStripped or not entry.tracks then
+		return
+	end
+	local tracks = entry.tracks
+
+	local attackTrack = tracks.attack
 	-- The raw asset has trailing recovery frames after the visible swing
 	-- peaks. We only stretch `0..PEAK` of the asset to cover the swing window
 	-- and Stop the track at the peak, so the recovery never plays and the
@@ -362,25 +494,25 @@ local function onAttack(payload)
 	if rawLength <= 0 then
 		rawLength = 0.7
 	end
-	local swingDuration = cooldown * 0.9
 	local visibleSwing = rawLength * Constants.ENEMY.ATTACK_ANIM_PEAK_FRACTION
 	local speed = visibleSwing / swingDuration
-	-- Idle underneath gives the rig a pose to settle into when attack stops.
-	if not entry.tracks.walk.IsPlaying and not entry.tracks.idle.IsPlaying then
-		entry.tracks.idle:Play(0)
+	if not tracks.walk.IsPlaying and not tracks.idle.IsPlaying then
+		tracks.idle:Play(0)
 	end
 	attackTrack:Play(0.05, 1, speed)
 	attackTrack:AdjustSpeed(speed)
 
-	-- Stop the track right after the impact lands so it doesn't sit on the
-	-- last frame for the remainder of the cooldown.
 	task.delay(swingDuration, function()
 		if attackTrack.IsPlaying then
 			attackTrack:Stop(0.15)
 		end
 	end)
 
-	-- Wind-up plume around the enemy body during the swing.
+	-- Drop VFX entirely once concurrent budget is spent. Anim still plays.
+	if activeSmashes >= Constants.PERFORMANCE.MAX_CONCURRENT_SMASHES then
+		return
+	end
+
 	SmashEffect.PlayWindup(entry.hrp.Position, entry.color)
 
 	if typeof(payload.origin) == "Vector3" and typeof(payload.yaw) == "number" then
@@ -390,10 +522,15 @@ local function onAttack(payload)
 		local color = entry.color
 		local materialIndex = entry.materialIndex
 		local archetypeIndex = entry.archetypeIndex
-		-- Smash spawns at the end of the swing, matching server damage timing.
+		activeSmashes += 1
 		task.delay(swingDuration, function()
-			SmashEffect.Play(origin, yaw, color, materialIndex, archetypeIndex, seed)
-			maybeShakeForImpact(origin)
+			if not perfMode then
+				SmashEffect.Play(origin, yaw, color, materialIndex, archetypeIndex, seed)
+				maybeShakeForImpact(origin)
+			end
+		end)
+		task.delay(swingDuration + smashTtl, function()
+			activeSmashes -= 1
 		end)
 	end
 end
@@ -402,6 +539,7 @@ local function onPositions(buf: buffer)
 	if typeof(buf) ~= "buffer" then
 		return
 	end
+	debug.profilebegin("Enemy.DecodePositions")
 	local count = buffer.readu16(buf, 0)
 	local offset = 2
 	local now = workspace:GetServerTimeNow()
@@ -429,18 +567,59 @@ local function onPositions(buf: buffer)
 			end
 		end
 	end
+	debug.profileend()
 end
 
 local function tick(_dt: number)
+	debug.profilebegin("Enemy.ClientTick")
+	frameCounter += 1
 	local now = workspace:GetServerTimeNow()
+	-- Cache camera position once per frame; LOD bands are cheap squared compares.
+	local camera = Workspace.CurrentCamera
+	local camPos = if camera then camera.CFrame.Position else Vector3.zero
+	local farSq = Constants.PERFORMANCE.CLIENT_LOD_FAR ^ 2
+	local cullSq = Constants.PERFORMANCE.CLIENT_CULL_DISTANCE ^ 2
+	local farFrames = Constants.PERFORMANCE.CLIENT_THROTTLE_FRAMES
+
 	for _, entry in enemies do
+		if not entry.model then
+			continue
+		end
+		local pos = entry.targetCF.Position
+		local dx = pos.X - camPos.X
+		local dy = pos.Y - camPos.Y
+		local dz = pos.Z - camPos.Z
+		local distSq = dx * dx + dy * dy + dz * dz
+
+		-- Cull band: park out of Workspace so render doesn't see it. Re-parent
+		-- on return. Cheaper than transparency tweaks because the rig stops
+		-- being considered for rendering / animation eval entirely.
+		if distSq > cullSq then
+			if entry.visible then
+				entry.model.Parent = nil
+				entry.visible = false
+			end
+			continue
+		elseif not entry.visible then
+			entry.model.Parent = entry.parentedTo
+			entry.visible = true
+		end
+
+		-- Far band: throttle interpolation updates.
+		if distSq > farSq and (frameCounter % farFrames) ~= (entry.id % farFrames) then
+			continue
+		end
+
 		if not entry.hrp.Parent then
 			continue
 		end
 		local t = math.clamp((now - entry.interpStart) / entry.interpDur, 0, 1.25)
 		entry.hrp.CFrame = entry.prevCF:Lerp(entry.targetCF, t)
 	end
-	applyShake()
+	if not perfMode then
+		applyShake()
+	end
+	debug.profileend()
 end
 
 local function handleClickRaycast()
@@ -462,6 +641,37 @@ local function handleClickRaycast()
 	end
 	print(string.format("[Client] Clicked enemy %d (%s)", id, model.Name))
 	clickEvent:FireServer(id)
+end
+
+function EnemyController.SetPerformanceMode(enabled: boolean)
+	if perfMode == enabled then
+		return
+	end
+	perfMode = enabled
+	if enabled then
+		-- Strip existing rigs in place — name tags off, animations stopped.
+		for _, entry in enemies do
+			stripRigForPerfMode(entry)
+		end
+		-- Cancel any pending camera shake.
+		shakeAmplitude = 0
+		shakeDuration = 0
+		local character = localPlayer and localPlayer.Character
+		local humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil
+		if humanoid then
+			humanoid.CameraOffset = Vector3.zero
+		end
+	else
+		-- Re-attach name tags + rebuild animators on existing rigs so they
+		-- come back to full visuals immediately, not only on next spawn.
+		for _, entry in enemies do
+			restoreRigFromPerfMode(entry)
+		end
+	end
+end
+
+function EnemyController.IsPerformanceMode(): boolean
+	return perfMode
 end
 
 function EnemyController.Init()

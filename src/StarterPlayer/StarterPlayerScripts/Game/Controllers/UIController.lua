@@ -11,6 +11,8 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Constants = require(Shared.Constants)
 local RemoteService = require(Shared.RemoteService)
 
+local EnemyController = require(script.Parent.EnemyController)
+
 local UIController = {}
 
 local settings = {
@@ -127,7 +129,7 @@ local function buildUI()
 	local panel = Instance.new("Frame")
 	panel.Name = "Panel"
 	panel.Position = UDim2.new(0, 16, 0, 64)
-	panel.Size = UDim2.fromOffset(280, 220)
+	panel.Size = UDim2.fromOffset(280, 268)
 	panel.BackgroundColor3 = Color3.fromRGB(24, 25, 30)
 	panel.BackgroundTransparency = 0.05
 	panel.BorderSizePixel = 0
@@ -209,7 +211,42 @@ local function buildUI()
 		killAllEvent:FireServer()
 	end)
 
+	-- Performance mode: client-side strip of VFX, nametags, animations,
+	-- and camera shake. Server-side AI is unchanged. Used when stress
+	-- testing high spawn counts.
+	local perfBtn = Instance.new("TextButton")
+	perfBtn.LayoutOrder = 6
+	perfBtn.Size = UDim2.new(1, 0, 0, 38)
+	perfBtn.BackgroundColor3 = Color3.fromRGB(55, 100, 70)
+	perfBtn.AutoButtonColor = true
+	perfBtn.BorderSizePixel = 0
+	perfBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
+	perfBtn.Font = Enum.Font.GothamBold
+	perfBtn.TextSize = 14
+	perfBtn.Text = "PERFORMANCE MODE: OFF"
+	perfBtn.Parent = panel
+	styleCorner(perfBtn, 6)
+
+	local function refreshPerfButton()
+		if EnemyController.IsPerformanceMode() then
+			perfBtn.Text = "PERFORMANCE MODE: ON"
+			perfBtn.BackgroundColor3 = Color3.fromRGB(180, 130, 50)
+		else
+			perfBtn.Text = "PERFORMANCE MODE: OFF"
+			perfBtn.BackgroundColor3 = Color3.fromRGB(55, 100, 70)
+		end
+	end
+
+	perfBtn.MouseButton1Click:Connect(function()
+		local enabled = not EnemyController.IsPerformanceMode()
+		EnemyController.SetPerformanceMode(enabled)
+		-- Also tell the server so it can drop spatial-hash + separation work.
+		settingsEvent:FireServer({ perfMode = enabled })
+		refreshPerfButton()
+	end)
+
 	refreshInputs()
+	refreshPerfButton()
 end
 
 function UIController.Init()
