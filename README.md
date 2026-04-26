@@ -14,7 +14,7 @@ Submission for the WKEY Studios Gameplay Engineer take-home (LUAU programmer, du
   on the server and replicated by index — every client renders identical
   visuals.
 - Enemies **chase the closest player who is on the platform** and ignore
-  anyone off it. Within attack range they play the default Zombie attack
+  anyone off it. Within attack range they play an attack
   animation, fire a smash VFX, and deal damage on a per-archetype cooldown.
 - **Wander when no target.** With no on-platform players, enemies pick a
   random point on the platform and stroll there at half walk speed.
@@ -124,7 +124,7 @@ Profiled per-tick costs at extreme densities (40 × 40 platform):
 ## Client side
 - Each spawn packet builds a fresh **R6 rig** via
   `Players:CreateHumanoidModelFromDescription` so the standard Motor6D
-  layout matches the default zombie animations
+  layout matches the stock animations referenced by ID
   (idle `180435571`, walk `180426354`, attack `184574340`).
 - All BaseParts get the rolled color/material; the rig is uniformly scaled
   by sizing parts and translating Motor6D `C0/C1` positions.
@@ -170,7 +170,8 @@ plugin. (DonkeySync also works for the same `src/` layout.)
 ### Libraries used
 
 None. Only the Roblox standard libraries (`buffer`, `task`, `RunService`,
-etc.) and the default zombie animations (asset IDs in `Constants.lua`).
+etc.) and the three stock animation assets referenced by ID in
+`Constants.lua` (idle / walk / attack).
 
 ## Trade-offs
 
