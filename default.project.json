@@ -11,13 +11,7 @@
     "ServerScriptService": {
       "$className": "ServerScriptService",
       "Game": {
-        "$className": "Folder",
-        "init": {
-          "$path": "src/ServerScriptService/Game/init.server.lua"
-        },
-        "Services": {
-          "$path": "src/ServerScriptService/Game/Services"
-        }
+        "$path": "src/ServerScriptService/Game"
       }
     },
     "StarterPlayer": {
@@ -25,13 +19,7 @@
       "StarterPlayerScripts": {
         "$className": "StarterPlayerScripts",
         "Game": {
-          "$className": "Folder",
-          "init": {
-            "$path": "src/StarterPlayer/StarterPlayerScripts/Game/init.client.lua"
-          },
-          "Controllers": {
-            "$path": "src/StarterPlayer/StarterPlayerScripts/Game/Controllers"
-          }
+          "$path": "src/StarterPlayer/StarterPlayerScripts/Game"
         }
       }
     },
@@ -40,7 +28,6 @@
       "Platform": {
         "$className": "Part",
         "$properties": {
-          "Name": "Platform",
           "Anchored": true,
           "Size": [50, 1, 50],
           "Position": [0, 0.5, 0],
@@ -53,7 +40,6 @@
       "Baseplate": {
         "$className": "Part",
         "$properties": {
-          "Name": "Baseplate",
           "Anchored": true,
           "Size": [200, 1, 200],
           "Position": [0, -10, 0],
@@ -66,7 +52,6 @@
       "SpawnLocation": {
         "$className": "SpawnLocation",
         "$properties": {
-          "Name": "SpawnLocation",
           "Anchored": true,
           "Size": [6, 1, 6],
           "Position": [0, 1.5, 0],

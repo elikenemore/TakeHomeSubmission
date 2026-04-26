@@ -3,7 +3,8 @@
 -- and Start() in two passes so cross-controller wiring is safe in Start.
 
 local controllers = {}
-local controllerFolder = script.Parent:WaitForChild("Controllers")
+-- See server init for why both lookups are needed (Rojo vs DonkeySync layout).
+local controllerFolder = script:FindFirstChild("Controllers") or script.Parent:WaitForChild("Controllers")
 
 for _, child in controllerFolder:GetChildren() do
 	if child:IsA("ModuleScript") then
