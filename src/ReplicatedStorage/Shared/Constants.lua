@@ -14,9 +14,16 @@ Constants.SPAWN = {
 	DEFAULT_RATE_PER_SEC = 1,
 	DEFAULT_MAX_COUNT = 20,
 	MIN_RATE = 0,
-	MAX_RATE = 30,
+	-- Effectively unlimited; the server still bounds per-frame spawn cost
+	-- via SPAWN_BURST_PER_FRAME so a 10000/s rate can't lock the tick.
+	MAX_RATE = 10000,
 	MIN_CAP = 0,
-	MAX_CAP = 250,
+	MAX_CAP = 100000,
+	-- Hard ceiling on enemies spawned in a single Heartbeat — keeps spike
+	-- frames bounded if dt stalls. At MAX_RATE=10000 and 60fps that's ~167
+	-- spawns per frame, so 1024 is a comfortable headroom without throttling
+	-- the configured rate.
+	SPAWN_BURST_PER_FRAME = 1024,
 }
 
 Constants.ENEMY = {
@@ -87,6 +94,29 @@ Constants.REMOTES = {
 	SETTINGS = "SpawnerSettings",
 	KILL_ALL = "KillAllEnemies",
 	GET_INITIAL = "GetInitialState",
+}
+
+Constants.PERFORMANCE = {
+	-- Server AI tick decoupled from Heartbeat; fixed-rate accumulator.
+	AI_TICK_RATE_HZ = 20,
+	-- Hard cap on enemies running full AI per tick (rest stay in cheap mode).
+	ACTIVE_AI_CAP = 60,
+	-- How often each enemy refreshes its cached "closest player" target.
+	CLOSEST_PLAYER_CACHE_INTERVAL = 0.2,
+	-- Spatial hash cell size (studs) used for O(1) neighbor lookups during separation.
+	SEPARATION_GRID_CELL = 8,
+	-- Skip replicating an enemy if it moved less than this since last send (squared compare).
+	REPLICATION_POSITION_EPSILON = 0.05,
+	-- Force a full re-send for every enemy at least this often (catches dropped packets).
+	REPLICATION_FORCE_INTERVAL = 1.0,
+	-- Client LOD bands (studs from camera).
+	CLIENT_LOD_NEAR = 70,
+	CLIENT_LOD_FAR = 160,
+	CLIENT_CULL_DISTANCE = 260,
+	-- Far enemies update visuals every Nth frame.
+	CLIENT_THROTTLE_FRAMES = 3,
+	-- Cap simultaneously animating smash effects on the client.
+	MAX_CONCURRENT_SMASHES = 8,
 }
 
 return table.freeze(Constants)

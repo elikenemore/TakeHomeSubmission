@@ -1,15 +1,28 @@
 --!strict
 -- Authoritative enemy state and chase AI.
 --
--- Replication model:
---   * Enemies are server-only data. No parts are created server-side, so
---     Roblox's default per-frame property replication never runs for them.
---   * Spawn / despawn / attack events go through reliable RemoteEvents with
---     compact payloads (id + variation indices, not the rendered model).
+-- Performance design:
+--   * AI runs at fixed PERFORMANCE.AI_TICK_RATE_HZ via an accumulator inside
+--     Heartbeat — predictable cost, decoupled from render rate.
+--   * Per tick, at most PERFORMANCE.ACTIVE_AI_CAP enemies run full chase logic;
+--     enemies are ranked by distance to the closest player, the top N update,
+--     the rest hold pose. This keeps cost bounded even at 250 enemies.
+--   * Separation uses a per-tick spatial hash over the 9 surrounding cells —
+--     turns the O(N^2) pile into ~O(N).
+--   * Closest-player lookup is cached per enemy and refreshed every
+--     CLOSEST_PLAYER_CACHE_INTERVAL seconds (cheap re-read of cached target's
+--     position in between).
+--   * Replication uses delta encoding: an enemy only ships in the position
+--     packet if its pos / yaw / state changed beyond threshold OR the force
+--     interval elapsed.
+--
+-- Replication wire format:
+--   * Spawn / despawn / attack go through reliable RemoteEvents with compact
+--     payloads (no parts cross the wire).
 --   * Position + state are sent at REPLICATION.UPDATE_RATE_HZ via an
---     UnreliableRemoteEvent carrying a packed `buffer`. Each enemy costs
---     11 bytes per tick (id u16, state u8, x/y/z i16 fixed-point, yaw i16).
---     Clients lerp between updates to hide the low rate.
+--     UnreliableRemoteEvent carrying a packed `buffer`. Each enemy that
+--     changes that tick costs 11 bytes (id u16, state u8, x/y/z i16
+--     fixed-point, yaw i16). Clients lerp between updates to mask the rate.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -31,7 +44,17 @@ type Enemy = {
 	health: number,
 	nextAttackAt: number,
 	wanderTarget: Vector3?,
+	cachedTarget: Player?,
+	cachedTargetPos: Vector3?,
+	cachedTargetDist: number,
+	cachedTargetAt: number,
+	lastReplicatedPos: Vector3,
+	lastReplicatedYaw: number,
+	lastReplicatedState: number,
+	lastReplicatedAt: number,
 }
+
+type PlayerInfo = { player: Player, position: Vector3 }
 
 local EnemyService = {}
 
@@ -48,6 +71,19 @@ local spawnRate = Constants.SPAWN.DEFAULT_RATE_PER_SEC
 local maxCount = Constants.SPAWN.DEFAULT_MAX_COUNT
 local timeSinceSpawn = 0
 local timeSinceReplicate = 0
+local timeSinceTick = 0
+
+-- Server-side perf flag. Toggled by the client UI alongside the client-side
+-- visual strip. When on we skip spatial hash + separation entirely so the
+-- per-tick AI cost drops to "closest-player chase, no neighbour awareness".
+-- The chase + attack + replication paths are unchanged so requirements still
+-- hold.
+local serverPerfMode = false
+
+-- UnreliableRemoteEvent caps each packet at ~900 bytes (one MTU). At 11 bytes
+-- per enemy + a 2-byte header, 80 fits with margin. Going over silently drops
+-- the entire packet, so high-count broadcasts MUST chunk.
+local MAX_ENEMIES_PER_PACKET = 80
 
 local spawnEvent: RemoteEvent
 local despawnEvent: RemoteEvent
@@ -57,6 +93,14 @@ local clickEvent: RemoteEvent
 local settingsEvent: RemoteEvent
 local killAllEvent: RemoteEvent
 local getInitialFn: RemoteFunction
+
+-- Reusable scratch tables; cleared per tick instead of re-allocated.
+local enemyArray: { Enemy } = {}
+local replicateArray: { Enemy } = {}
+local spatialGrid: { [number]: { Enemy } } = {}
+local playerHRPs: { PlayerInfo } = {}
+
+local CELL_SIZE = Constants.PERFORMANCE.SEPARATION_GRID_CELL
 
 local function makeSpawnPayload(enemy: Enemy)
 	return {
@@ -78,15 +122,25 @@ local function spawnEnemy()
 	nextId += 1
 	local variant = EnemyVariants.Roll(rng)
 	local heightOffset = Constants.ENEMY.HEIGHT_OFFSET * variant.scale
+	local position = PlatformService.RandomSpawnPosition(rng, heightOffset)
+	local yaw = rng:NextNumber() * math.pi * 2
 	local enemy: Enemy = {
 		id = id,
-		position = PlatformService.RandomSpawnPosition(rng, heightOffset),
-		yaw = rng:NextNumber() * math.pi * 2,
+		position = position,
+		yaw = yaw,
 		state = STATE_IDLE,
 		variant = variant,
 		health = Constants.ENEMY.BASE_HEALTH,
 		nextAttackAt = 0,
 		wanderTarget = nil,
+		cachedTarget = nil,
+		cachedTargetPos = nil,
+		cachedTargetDist = math.huge,
+		cachedTargetAt = 0,
+		lastReplicatedPos = position,
+		lastReplicatedYaw = yaw,
+		lastReplicatedState = STATE_IDLE,
+		lastReplicatedAt = 0,
 	}
 	enemies[id] = enemy
 	enemyCount += 1
@@ -102,10 +156,9 @@ local function despawnEnemy(id: number)
 	despawnEvent:FireAllClients(id)
 end
 
-local function getClosestPlayerOnPlatform(position: Vector3): (Player?, Vector3?)
-	local closestPlayer: Player? = nil
-	local closestDist: number? = nil
-	local closestPos: Vector3? = nil
+local function refreshPlayerCache()
+	debug.profilebegin("Enemy.RefreshPlayers")
+	table.clear(playerHRPs)
 	for _, player in Players:GetPlayers() do
 		local character = player.Character
 		if not character then
@@ -118,40 +171,109 @@ local function getClosestPlayerOnPlatform(position: Vector3): (Player?, Vector3?
 		if not PlatformService.IsPositionOnPlatform(hrp.Position) then
 			continue
 		end
-		local d = (hrp.Position - position).Magnitude
-		if not closestDist or d < closestDist then
-			closestPlayer = player
-			closestDist = d
-			closestPos = hrp.Position
-		end
+		table.insert(playerHRPs, { player = player, position = hrp.Position })
 	end
-	return closestPlayer, closestPos
+	debug.profileend()
 end
 
--- Sums repulsion from nearby enemies so they spread out instead of stacking
--- on the same target. Linear falloff inside SEPARATION_RADIUS.
-local function computeSeparation(self: Enemy): Vector3
-	local push = Vector3.zero
-	local radius = Constants.ENEMY.SEPARATION_RADIUS * self.variant.scale
-	for _, other in enemies do
-		if other.id == self.id then
-			continue
-		end
-		local diff = self.position - other.position
-		local flat = Vector3.new(diff.X, 0, diff.Z)
-		local d = flat.Magnitude
-		local combined = radius + Constants.ENEMY.SEPARATION_RADIUS * other.variant.scale
-		if d > 0.001 and d < combined then
-			local strength = (combined - d) / combined
-			push += flat.Unit * strength
+-- Cached closest-player lookup. Between full refreshes we cheaply re-read the
+-- cached target's HRP position so chase still tracks moving players, but skip
+-- the full O(P) scan.
+local function updateClosestPlayer(enemy: Enemy, now: number)
+	if now - enemy.cachedTargetAt < Constants.PERFORMANCE.CLOSEST_PLAYER_CACHE_INTERVAL
+		and enemy.cachedTarget
+	then
+		local character = enemy.cachedTarget.Character
+		local hrp = if character then character:FindFirstChild("HumanoidRootPart") else nil
+		if hrp and hrp:IsA("BasePart") and PlatformService.IsPositionOnPlatform(hrp.Position) then
+			enemy.cachedTargetPos = hrp.Position
+			enemy.cachedTargetDist = (hrp.Position - enemy.position).Magnitude
+			return
 		end
 	end
-	return push * Constants.ENEMY.SEPARATION_STRENGTH
+	enemy.cachedTargetAt = now
+	local closest: Player? = nil
+	local closestDist: number = math.huge
+	local closestPos: Vector3? = nil
+	for _, info in playerHRPs do
+		local d = (info.position - enemy.position).Magnitude
+		if d < closestDist then
+			closest = info.player
+			closestDist = d
+			closestPos = info.position
+		end
+	end
+	enemy.cachedTarget = closest
+	enemy.cachedTargetPos = closestPos
+	enemy.cachedTargetDist = closestDist
+end
+
+-- Pack two signed cell indices into one number for use as a hash key.
+local function gridKey(x: number, z: number): number
+	local ix = math.floor(x / CELL_SIZE)
+	local iz = math.floor(z / CELL_SIZE)
+	return (ix + 32768) * 65536 + (iz + 32768)
+end
+
+local function rebuildSpatialGrid()
+	debug.profilebegin("Enemy.RebuildGrid")
+	table.clear(spatialGrid)
+	for _, enemy in enemies do
+		local key = gridKey(enemy.position.X, enemy.position.Z)
+		local bucket = spatialGrid[key]
+		if not bucket then
+			bucket = {}
+			spatialGrid[key] = bucket
+		end
+		table.insert(bucket, enemy)
+	end
+	debug.profileend()
+end
+
+-- Hot path: scalar math throughout. Avoids per-pair Vector3 allocation
+-- (and the second Vector3 from `flat.Unit`) which dominated this loop at
+-- high enemy counts.
+local function computeSeparation(self: Enemy): Vector3
+	if serverPerfMode then
+		return Vector3.zero
+	end
+	local pushX, pushZ = 0, 0
+	local radius = Constants.ENEMY.SEPARATION_RADIUS * self.variant.scale
+	local sx, sz = self.position.X, self.position.Z
+	local ix = math.floor(sx / CELL_SIZE)
+	local iz = math.floor(sz / CELL_SIZE)
+	local selfId = self.id
+	local baseRadius = Constants.ENEMY.SEPARATION_RADIUS
+	for dx = -1, 1 do
+		for dz = -1, 1 do
+			local key = (ix + dx + 32768) * 65536 + (iz + dz + 32768)
+			local bucket = spatialGrid[key]
+			if bucket then
+				for _, other in bucket do
+					if other.id == selfId then
+						continue
+					end
+					local op = other.position
+					local fx = sx - op.X
+					local fz = sz - op.Z
+					local distSq = fx * fx + fz * fz
+					local combined = radius + baseRadius * other.variant.scale
+					if distSq > 0.000001 and distSq < combined * combined then
+						local d = math.sqrt(distSq)
+						local strength = (combined - d) / combined / d
+						pushX += fx * strength
+						pushZ += fz * strength
+					end
+				end
+			end
+		end
+	end
+	local k = Constants.ENEMY.SEPARATION_STRENGTH
+	return Vector3.new(pushX * k, 0, pushZ * k)
 end
 
 local function fireSmash(enemy: Enemy, target: Player)
 	local archetype = EnemyVariants.GetArchetype(enemy.variant.archetypeIndex)
-	-- Origin sits where the strike lands: in front of the enemy at platform top.
 	local platformY = PlatformService.GetTopY()
 	local forward = Vector3.new(-math.sin(enemy.yaw), 0, -math.cos(enemy.yaw))
 	local origin = Vector3.new(enemy.position.X, platformY, enemy.position.Z)
@@ -164,8 +286,6 @@ local function fireSmash(enemy: Enemy, target: Player)
 	}
 	attackEvent:FireAllClients(payload)
 
-	-- Damage lands at the end of the attack animation; the client stretches
-	-- the anim playback to cover the full cooldown so this stays in sync.
 	local damage = archetype.damage
 	local damageDelay = archetype.cooldown * Constants.ENEMY.DAMAGE_DELAY_FRACTION
 	task.delay(damageDelay, function()
@@ -184,7 +304,6 @@ local function fireSmash(enemy: Enemy, target: Player)
 		if not hrp or not hrp:IsA("BasePart") then
 			return
 		end
-		-- Only land the hit if the player is still inside the smash radius.
 		local horiz = (Vector3.new(hrp.Position.X, 0, hrp.Position.Z)
 			- Vector3.new(origin.X, 0, origin.Z)).Magnitude
 		if horiz <= archetype.smashRadius then
@@ -199,12 +318,12 @@ local function pickWanderTarget(enemy: Enemy): Vector3
 end
 
 local function updateEnemy(enemy: Enemy, dt: number)
-	local target, targetPos = getClosestPlayerOnPlatform(enemy.position)
+	local target = enemy.cachedTarget
+	local targetPos = enemy.cachedTargetPos
 	local archetype = EnemyVariants.GetArchetype(enemy.variant.archetypeIndex)
 	local hipHeight = Constants.ENEMY.HEIGHT_OFFSET * enemy.variant.scale
 
 	if not target or not targetPos then
-		-- No player on the platform: pick a random target and amble toward it.
 		if not enemy.wanderTarget then
 			enemy.wanderTarget = pickWanderTarget(enemy)
 		end
@@ -225,7 +344,6 @@ local function updateEnemy(enemy: Enemy, dt: number)
 			return
 		end
 		dir = dir.Unit
-		-- Wander at half pace so it reads as ambling, not chasing.
 		local step = math.min(Constants.ENEMY.WALK_SPEED * 0.5 * dt, dist)
 		local newPos = enemy.position + dir * step
 		newPos = PlatformService.ClampToPlatform(newPos)
@@ -236,7 +354,6 @@ local function updateEnemy(enemy: Enemy, dt: number)
 		return
 	end
 
-	-- Player detected: drop any active wander goal.
 	enemy.wanderTarget = nil
 
 	local diff = targetPos - enemy.position
@@ -245,8 +362,6 @@ local function updateEnemy(enemy: Enemy, dt: number)
 	if dist <= archetype.attackRange then
 		enemy.state = STATE_ATTACK
 		if dist > 0.001 then
-			-- Yaw is consumed as CFrame.Angles(0, yaw, 0); the rig's LookVector
-			-- needs to align with the chase direction, so negate flat components.
 			enemy.yaw = math.atan2(-flat.X, -flat.Z)
 		end
 		local now = os.clock()
@@ -274,34 +389,127 @@ local function updateEnemy(enemy: Enemy, dt: number)
 	enemy.state = STATE_WALK
 end
 
+local function runAITick(dt: number)
+	if enemyCount == 0 then
+		return
+	end
+	debug.profilebegin("Enemy.AITick")
+	local now = os.clock()
+	refreshPlayerCache()
+
+	debug.profilebegin("Enemy.ClosestPlayer")
+	table.clear(enemyArray)
+	for _, enemy in enemies do
+		updateClosestPlayer(enemy, now)
+		table.insert(enemyArray, enemy)
+	end
+	debug.profileend()
+
+	-- Closest enemies get full AI; far / no-target enemies (math.huge) sort
+	-- to the back and are skipped this tick.
+	debug.profilebegin("Enemy.SortByDist")
+	table.sort(enemyArray, function(a, b)
+		return a.cachedTargetDist < b.cachedTargetDist
+	end)
+	debug.profileend()
+
+	if not serverPerfMode then
+		rebuildSpatialGrid()
+	end
+
+	debug.profilebegin("Enemy.UpdateLoop")
+	local cap = Constants.PERFORMANCE.ACTIVE_AI_CAP
+	for i, enemy in enemyArray do
+		if i > cap then
+			-- Inactive: keep state stable, no movement, no attack scheduling.
+			enemy.state = STATE_IDLE
+		else
+			updateEnemy(enemy, dt)
+		end
+	end
+	debug.profileend()
+	debug.profileend()
+end
+
 local function encodeFixed(v: number): number
 	return math.clamp(math.floor(v * Constants.REPLICATION.POSITION_PRECISION + 0.5), -32768, 32767)
 end
 
 local function encodeYaw(yaw: number): number
-	-- Wrap to [-pi, pi] then map to int16.
 	local wrapped = ((yaw + math.pi) % (math.pi * 2)) - math.pi
 	return math.clamp(math.floor(wrapped / math.pi * 32767 + 0.5), -32768, 32767)
+end
+
+-- Delta predicate: only ship enemies whose pos / yaw / state actually changed
+-- since their last broadcast, OR whose force-resend interval elapsed (catches
+-- packet loss on the unreliable channel).
+local POS_EPSILON_SQ = Constants.PERFORMANCE.REPLICATION_POSITION_EPSILON
+local YAW_EPSILON = 0.05
+local FORCE_INTERVAL = Constants.PERFORMANCE.REPLICATION_FORCE_INTERVAL
+
+local function shouldReplicate(enemy: Enemy, now: number): boolean
+	if now - enemy.lastReplicatedAt >= FORCE_INTERVAL then
+		return true
+	end
+	if enemy.state ~= enemy.lastReplicatedState then
+		return true
+	end
+	local dx = enemy.position.X - enemy.lastReplicatedPos.X
+	local dy = enemy.position.Y - enemy.lastReplicatedPos.Y
+	local dz = enemy.position.Z - enemy.lastReplicatedPos.Z
+	if dx * dx + dy * dy + dz * dz > POS_EPSILON_SQ then
+		return true
+	end
+	if math.abs(enemy.yaw - enemy.lastReplicatedYaw) > YAW_EPSILON then
+		return true
+	end
+	return false
 end
 
 local function replicatePositions()
 	if enemyCount == 0 then
 		return
 	end
-	-- 2 byte header (count) + 11 bytes per enemy.
-	local buf = buffer.create(2 + enemyCount * 11)
-	buffer.writeu16(buf, 0, enemyCount)
-	local offset = 2
+	debug.profilebegin("Enemy.Replicate")
+	local now = os.clock()
+	table.clear(replicateArray)
 	for _, enemy in enemies do
-		buffer.writeu16(buf, offset, enemy.id)
-		buffer.writeu8(buf, offset + 2, enemy.state)
-		buffer.writei16(buf, offset + 3, encodeFixed(enemy.position.X))
-		buffer.writei16(buf, offset + 5, encodeFixed(enemy.position.Y))
-		buffer.writei16(buf, offset + 7, encodeFixed(enemy.position.Z))
-		buffer.writei16(buf, offset + 9, encodeYaw(enemy.yaw))
-		offset += 11
+		if shouldReplicate(enemy, now) then
+			table.insert(replicateArray, enemy)
+		end
 	end
-	positionsEvent:FireAllClients(buf)
+	local total = #replicateArray
+	if total == 0 then
+		debug.profileend()
+		return
+	end
+	-- Chunked broadcast: each packet is self-describing (count header) so the
+	-- client decoder needs no awareness of chunking. Going over MTU silently
+	-- drops the whole packet, which manifests as enemies that don't move.
+	local sent = 0
+	while sent < total do
+		local chunk = math.min(MAX_ENEMIES_PER_PACKET, total - sent)
+		local buf = buffer.create(2 + chunk * 11)
+		buffer.writeu16(buf, 0, chunk)
+		local offset = 2
+		for i = 1, chunk do
+			local enemy = replicateArray[sent + i]
+			buffer.writeu16(buf, offset, enemy.id)
+			buffer.writeu8(buf, offset + 2, enemy.state)
+			buffer.writei16(buf, offset + 3, encodeFixed(enemy.position.X))
+			buffer.writei16(buf, offset + 5, encodeFixed(enemy.position.Y))
+			buffer.writei16(buf, offset + 7, encodeFixed(enemy.position.Z))
+			buffer.writei16(buf, offset + 9, encodeYaw(enemy.yaw))
+			offset += 11
+			enemy.lastReplicatedPos = enemy.position
+			enemy.lastReplicatedYaw = enemy.yaw
+			enemy.lastReplicatedState = enemy.state
+			enemy.lastReplicatedAt = now
+		end
+		positionsEvent:FireAllClients(buf)
+		sent += chunk
+	end
+	debug.profileend()
 end
 
 local function broadcastSettings()
@@ -336,11 +544,28 @@ function EnemyService.Start()
 		if typeof(payload) ~= "table" then
 			return
 		end
+		local rateChanged = false
 		if typeof(payload.spawnRate) == "number" then
 			spawnRate = math.clamp(payload.spawnRate, Constants.SPAWN.MIN_RATE, Constants.SPAWN.MAX_RATE)
+			rateChanged = true
 		end
 		if typeof(payload.maxCount) == "number" then
 			maxCount = math.clamp(math.floor(payload.maxCount), Constants.SPAWN.MIN_CAP, Constants.SPAWN.MAX_CAP)
+		end
+		if typeof(payload.perfMode) == "boolean" then
+			serverPerfMode = payload.perfMode
+		end
+		-- Pre-fill the accumulator to one full new-rate interval so the next
+		-- Heartbeat spawns immediately, then resumes at the configured rate.
+		-- Without this, dropping to 0.1/s would mean a 10s wait for the first
+		-- visible response — feels broken. Going from low to high also gets a
+		-- clean kick rather than picking up stale low-rate debt.
+		if rateChanged then
+			if spawnRate > 0 then
+				timeSinceSpawn = 1 / spawnRate
+			else
+				timeSinceSpawn = 0
+			end
 		end
 		broadcastSettings()
 	end)
@@ -367,28 +592,43 @@ function EnemyService.Start()
 		}
 	end
 
+	local aiTickInterval = 1 / Constants.PERFORMANCE.AI_TICK_RATE_HZ
 	local replicateInterval = 1 / Constants.REPLICATION.UPDATE_RATE_HZ
 
 	RunService.Heartbeat:Connect(function(dt)
 		timeSinceSpawn += dt
+		timeSinceTick += dt
+		timeSinceReplicate += dt
+
 		if spawnRate > 0 then
+			debug.profilebegin("Enemy.SpawnLoop")
 			local interval = 1 / spawnRate
-			while timeSinceSpawn >= interval and enemyCount < maxCount do
+			-- Cap per-frame burst so an extreme rate can't lock the tick.
+			local burst = 0
+			local maxBurst = Constants.SPAWN.SPAWN_BURST_PER_FRAME
+			while timeSinceSpawn >= interval and enemyCount < maxCount and burst < maxBurst do
 				timeSinceSpawn -= interval
 				spawnEnemy()
+				burst += 1
 			end
 			if enemyCount >= maxCount then
 				timeSinceSpawn = math.min(timeSinceSpawn, interval)
+			elseif burst >= maxBurst then
+				-- Drop accumulated time so we don't pile up debt across frames.
+				timeSinceSpawn = math.min(timeSinceSpawn, interval)
 			end
+			debug.profileend()
 		else
 			timeSinceSpawn = 0
 		end
 
-		for _, enemy in enemies do
-			updateEnemy(enemy, dt)
+		-- Hard cap catch-up: if the server stalled, run at most one tick to
+		-- avoid a runaway loop chewing the rest of the frame.
+		if timeSinceTick >= aiTickInterval then
+			runAITick(aiTickInterval)
+			timeSinceTick = math.min(timeSinceTick - aiTickInterval, aiTickInterval)
 		end
 
-		timeSinceReplicate += dt
 		if timeSinceReplicate >= replicateInterval then
 			timeSinceReplicate -= replicateInterval
 			replicatePositions()
