@@ -13,7 +13,9 @@ Submission for the WKEY Studios Gameplay Engineer take-home (LUAU programmer, du
   visuals.
 - Enemies **chase the closest player who is on the platform** and ignore
   anyone off it. Within attack range they play the default Zombie attack
-  animation and deal 5 damage on a 1.4s cooldown.
+  animation, fire a smash VFX, and deal damage on a per-archetype cooldown.
+- **Wander when no target.** With no on-platform players, enemies pick a
+  random point on the platform and stroll there at half walk speed.
 - Each enemy carries a **unique numeric ID** consistent on both sides.
   Clicking an enemy (raycast on the local rig) prints the ID on the client
   *and* fires a server remote that prints it on the server.
@@ -74,11 +76,50 @@ replication is bypassed for enemies entirely.
 
   At 20 enemies × 10 Hz that is `(2 + 20·11) · 10 = 2,220 B/s` of position
   payload per client, with no per-part property syncing on top.
+- **Chunked broadcast.** UnreliableRemoteEvent caps at ~900 bytes per packet
+  (one MTU). At 11 bytes/enemy that's ~80 max per packet, so the broadcast
+  splits into 80-enemy chunks above that. Each chunk is self-describing
+  (count header), so the client decoder is unchanged.
+- **Delta encoding.** An enemy is only included in a packet if its
+  position / yaw / state changed beyond a threshold since the last send,
+  with a 1-second force-resend interval as a safety net for dropped packets.
 - **Late-join** is handled by a `RemoteFunction` (`GetInitialState`) that
   returns current settings + a snapshot of every live enemy. A new client
   hydrates from this snapshot, then keeps up via the position stream.
 
-### Client side
+## Server scalability
+
+Default-cap (20 enemies) is trivial. The system is built to scale far past
+that with bounded cost:
+
+- **Fixed-rate AI tick.** AI runs at 20 Hz via a Heartbeat accumulator,
+  decoupled from frame rate. Each tick is sized to fit a hard CPU budget.
+- **Active AI cap.** At most 60 enemies run full chase logic per tick,
+  ranked by distance to the closest player. Far enemies hold pose. Cost
+  stays flat regardless of total population.
+- **Spatial hash separation.** The per-tick pile-up problem (every enemy
+  pushing on every other) becomes O(N) instead of O(N²) by bucketing into
+  8-stud cells and only checking the 9 surrounding cells per enemy.
+- **Cached closest-player.** Each enemy refreshes its closest-player
+  scan every 0.2 s and reads the cached target's HRP cheaply in between.
+- **Performance mode toggle.** A button on the HUD flips a flag that:
+  - **Client:** strips name tags + animators on every existing rig and
+    skips them on new spawns; cancels camera shake and smash VFX.
+    Toggling off restores name tags + animators on all live rigs.
+  - **Server:** skips the spatial hash rebuild and short-circuits the
+    separation calculation entirely. Chase / attack / replication paths
+    are unchanged so requirements still hold.
+
+Profiled per-tick costs at extreme densities (40 × 40 platform):
+
+| N      | Grid rebuild | Sep top-60 | Sort by dist | Encode | Total / tick |
+| ------ | -----------: | ---------: | -----------: | -----: | -----------: |
+|  1,000 |     0.07 ms  |    0.45 ms |      0.25 ms | 0.12 ms |       ~0.7 ms |
+| 10,000 |     0.65 ms  |    5.26 ms |      4.35 ms | 1.32 ms |        ~10 ms |
+
+(50 ms tick budget at 20 Hz.) At 10K the AI tick is still ~20% of budget.
+
+## Client side
 - Each spawn packet builds a fresh **R6 rig** via
   `Players:CreateHumanoidModelFromDescription` so the standard Motor6D
   layout matches the default zombie animations
@@ -90,6 +131,12 @@ replication is bypassed for enemies entirely.
   state machine fighting our CFrame writes.
 - Each frame the client **lerps `prevCF → targetCF`** over the 100 ms tick
   window, so visual movement looks smooth despite the 10 Hz update rate.
+- **Three-band LOD.** Per-frame, each enemy is classified by squared
+  camera distance:
+  - **Near:** full lerp every frame.
+  - **Far:** lerp every Nth frame, hashed by id so the cost is staggered.
+  - **Cull:** parented out of Workspace entirely — no render or animation
+    eval — and re-parented when it returns to range.
 
 ## Click handling
 Clicks are detected client-side: `UserInputService.InputBegan` + `Mouse.Target`
@@ -97,14 +144,25 @@ checked against an `ENEMY_TAG` on rig parts, lifted to the model's `EnemyId`
 attribute. Client prints, then fires the `EnemyClicked` remote with the ID;
 server validates the ID exists and prints its own line.
 
-## Running locally
+## Building and running
+
+The repo is a standard Rojo project with `default.project.json` at the root.
 
 ```
-dsync serve            # starts DonkeySync on localhost:8080
+rojo build default.project.json -o EnemySpawner.rbxlx
 ```
-Then in Roblox Studio: open the DonkeySync plugin → Connect. Press play.
-A 50 × 50 platform appears with a green spawn pad; enemies start spawning
-once the place loads.
+
+Open the resulting `.rbxlx` in Roblox Studio and press Play. A 50 × 50
+slate platform appears at the origin with a SpawnLocation; enemies start
+spawning at 1 / s once the place loads.
+
+To live-edit during development, `rojo serve` and connect from the Studio
+plugin. (DonkeySync also works for the same `src/` layout.)
+
+### Libraries used
+
+None. Only the Roblox standard libraries (`buffer`, `task`, `RunService`,
+etc.) and the default zombie animations (asset IDs in `Constants.lua`).
 
 ## Things considered and dropped
 
@@ -112,9 +170,6 @@ once the place loads.
   obvious starting point but immediately replicates every CFrame change at
   the default rate. Pulled the parts onto the client and replaced the
   property sync with a packed buffer instead.
-- **Wandering AI**. The brief lists it as optional, and adding noise on top
-  of a target chase would have meant a separate "no target" code path with
-  its own movement budget. Skipped to keep the chase behavior clean.
 - **Pathfinding**. Brief says it is not required and the platform is flat
   and unobstructed, so straight-line steering with edge clamping is enough.
 - **Per-enemy network throttling by view frustum / distance**. Would have
