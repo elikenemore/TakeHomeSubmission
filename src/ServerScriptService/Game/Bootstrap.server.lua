@@ -3,10 +3,7 @@
 -- on each, mirroring the lifecycle pattern used by the client.
 
 local services = {}
--- Rojo collapses init.server.lua into the parent directory (so `script` IS Game,
--- and Services is a child). DonkeySync makes Game a Folder with init as a Script
--- child (so Services lives on script.Parent). Handle both.
-local serviceFolder = script:FindFirstChild("Services") or script.Parent:WaitForChild("Services")
+local serviceFolder = script.Parent:WaitForChild("Services")
 
 for _, child in serviceFolder:GetChildren() do
 	if child:IsA("ModuleScript") then

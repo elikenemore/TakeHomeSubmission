@@ -33,13 +33,13 @@ ReplicatedStorage/Shared/
   EnemyVariants.lua    -- material/name pools + Roll(rng) -> variant
 
 ServerScriptService/Game/
-  init.server.lua            -- one Script that requires every Service ModuleScript
+  Bootstrap.server.lua       -- one Script that requires every Service ModuleScript
   Services/
     PlatformService.lua      -- builds the platform, on-platform/clamping helpers
     EnemyService.lua         -- spawn loop, chase AI, attack, custom replication
 
 StarterPlayer/StarterPlayerScripts/Game/
-  init.client.lua            -- one LocalScript that requires every Controller ModuleScript
+  Bootstrap.client.lua       -- one LocalScript that requires every Controller ModuleScript
   Controllers/
     EnemyController.lua      -- builds R6 rigs locally, lerps positions, click raycast
     UIController.lua         -- HUD panel and Kill All
