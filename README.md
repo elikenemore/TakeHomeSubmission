@@ -164,19 +164,25 @@ plugin. (DonkeySync also works for the same `src/` layout.)
 None. Only the Roblox standard libraries (`buffer`, `task`, `RunService`,
 etc.) and the default zombie animations (asset IDs in `Constants.lua`).
 
-## Things considered and dropped
+## Trade-offs
 
-- **Server-side enemy models with PVInstance / Anchored parts**, which is the
-  obvious starting point but immediately replicates every CFrame change at
-  the default rate. Pulled the parts onto the client and replaced the
-  property sync with a packed buffer instead.
-- **Pathfinding**. Brief says it is not required and the platform is flat
-  and unobstructed, so straight-line steering with edge clamping is enough.
-- **Per-enemy network throttling by view frustum / distance**. Would have
-  saved more bandwidth on very large caps, but at the requested 20-enemy
-  default the savings are negligible against the readability cost. Easy to
-  bolt on later in `replicatePositions` by partitioning the buffer per
-  player.
-- **R15 + HumanoidDescription scaling.** Cleaner scale path, but the default
-  R15 zombie animations look noticeably less menacing than the R6 ones.
-  Stayed on R6 and scaled manually.
+Every choice below was made to keep the system cheap at high counts, not
+because the brief required it.
+
+- **Server-replicated rigs.** The obvious starting point, but default
+  replication pushes every CFrame change at the engine's tick rate, and
+  the cost grows linearly with enemy count. Moved rigs to clients and
+  fed them from a packed unreliable stream so network cost is bounded
+  by the broadcast rate, not the AI rate.
+- **PathfindingService.** Per-call `ComputeAsync` allocates and yields;
+  fine at 20 enemies, blows the 50 ms tick budget at 1K+. Straight-line
+  steering with edge clamping is constant-time per enemy and fits
+  inside the spatial-hash separation that already runs each tick.
+- **Per-player network throttling (frustum / distance).** Would help at
+  very large caps, but adds per-player buffer partitioning to a path
+  that already costs only ~2 KB/s/client at the default cap. Easy to
+  bolt onto `replicatePositions` later if the cap is raised.
+- **R15 + HumanoidDescription scaling.** R15 is 17 parts with full
+  Motor6D animation evaluation per rig per frame; R6 is 6 parts. With
+  thousands of client-side rigs that per-frame difference dominates,
+  so R6 with manual part scaling stays.
