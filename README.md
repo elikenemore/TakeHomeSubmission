@@ -2,7 +2,7 @@
 
 Submission for the WKEY Studios Gameplay Engineer take-home (LUAU programmer, due 2026-04-26).
 
-## What it does
+## What it does 
 
 - A **50 × 50 stud slate platform** sits at the origin (defined in
   `default.project.json` so a fresh `rojo build` produces a complete
