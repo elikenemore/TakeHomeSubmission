@@ -1,6 +1,12 @@
-# Enemy Spawner
+# NPC Performance Lab
 
-Submission for the WKEY Studios Gameplay Engineer take-home (LUAU programmer, due 2026-04-26).
+A personal Roblox project exploring how to make custom NPC replication and
+AI cheap enough to scale far past the usual handful of enemies. The goal is
+to understand where the cost actually lives — network, AI tick, client
+render — and to see how far each piece can be pushed before something
+breaks. The 1 / s spawn, 20-cap default, click-to-print, and Kill All
+button are all stock fixtures so the interesting parts (custom replication,
+LOD, spatial hash, AI cap) have something concrete to run against.
 
 ## What it does 
 
@@ -26,7 +32,8 @@ Submission for the WKEY Studios Gameplay Engineer take-home (LUAU programmer, du
 
 ## Architecture
 
-One-script hierarchy as recommended in the brief.
+One-script-per-side hierarchy — a single server bootstrap and a single
+client bootstrap that each require their respective module tree.
 
 ```
 ReplicatedStorage/Shared/
@@ -52,8 +59,8 @@ state only; cross-module wiring happens in `Start` so order is irrelevant.
 
 ## Custom replication (the interesting part)
 
-The brief weights heavily on the network `Recv` stat, so default Roblox
-replication is bypassed for enemies entirely.
+The network `Recv` stat is the easiest thing to blow at high enemy counts,
+so default Roblox replication is bypassed for enemies entirely.
 
 - **Server holds no enemy parts.** Each enemy lives only as a Lua table
   (`id, position, yaw, state, variant, health`). Position is updated every
@@ -157,7 +164,7 @@ server validates the ID exists and prints its own line.
 The repo is a standard Rojo project with `default.project.json` at the root.
 
 ```
-rojo build default.project.json -o EnemySpawner.rbxlx
+rojo build default.project.json -o NPCPerformanceLab.rbxlx
 ```
 
 Open the resulting `.rbxlx` in Roblox Studio and press Play. A 50 × 50
@@ -175,8 +182,10 @@ etc.) and the three stock animation assets referenced by ID in
 
 ## Trade-offs
 
-Every choice below was made to keep the system cheap at high counts, not
-because the brief required it.
+Every choice below was made to keep the system cheap at high counts. At
+the 20-enemy default these optimizations are pure overkill; the point was
+to see what each one buys once you push the cap by an order of magnitude
+or two.
 
 - **Server-replicated rigs.** The obvious starting point, but default
   replication pushes every CFrame change at the engine's tick rate, and
